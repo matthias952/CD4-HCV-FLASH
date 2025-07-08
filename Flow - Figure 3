@@ -1,0 +1,134 @@
+### Figure 3 - Flow Cytometry dimensionality reduction
+
+library(Matrix)
+library(flowCore)
+library(CATALYST) 
+library(ggplot2)
+library(SingleCellExperiment) 
+library(stringr)
+library(dplyr)
+
+# Specify directories
+setwd("filepath_fcs_files")
+file_paths <- getwd()
+
+# Search for all files in the specified directories and extract files by a given extension
+files_list          <- lapply(file_paths, list.files, recursive=TRUE)
+files_by_ext        <- lapply(files_list, function(x){x[endsWith(x, suffix=".fcs")]} )
+
+# Get complete paths to all files
+all_file_paths      <- unlist(lapply(seq_along(files_by_ext), function(x) {  paste(names(files_by_ext[x]), files_by_ext[[x]], sep="") } ))
+names(all_file_paths) <- lapply(strsplit(all_file_paths,split="/"), function(x) { sub(".fcs","",x[length(x)]) } )
+file_names <- unname(unlist(lapply(strsplit(unlist(files_by_ext),split = "/"),tail,1)))
+
+# Read the FCS files
+data_list <- list()
+fcs.par <- list()
+for (i in 1:length(file_names)) {
+  data_list[[i]] <- read.FCS(as.character(all_file_paths[i]), alter.names = TRUE)
+  fcs.par[[i]] <- as.character(data_list[[i]]@parameters@data$name)
+}
+
+# Find all the acquired parameters
+common.par <- Reduce(intersect, fcs.par)
+# Remove FSC SSC and time parameters
+common.par <- common.par[7:22] 
+
+# Subset the FCS files for fluorescent markers
+dir.create(paste0(getwd(),"/subset/"), showWarnings = FALSE) # Added showWarnings = FALSE
+sub_data_list <- list()
+subset_file_names <- list()
+
+for (i in 1:length(file_names)) {
+  sub_data_list[[i]] <- data_list[[i]][,common.par]
+  write.FCS(sub_data_list[[i]] , paste(getwd(),"/subset/",paste(sub(".fcs","",file_names[[i]]),"_subset",".fcs", sep = ""), sep = ""))
+  subset_file_names[[i]] <- paste(sub(".fcs","",file_names[[i]]),"_subset",".fcs", sep = "")
+}
+
+# Read the subset FCS files into a flowSet
+fs <- read.flowSet(path = paste0(getwd(),"/subset/"))
+
+# Create patient and sample annotations based on the file naming pattern
+md <- data.frame(file_name = as.character(unlist(subset_file_names)), stringsAsFactors = FALSE)
+md$date <- 
+md$patient <- 
+md$condition <- 
+md$sample_id <- 
+md$patientcondition <- 
+md$diffstate <- 
+
+# Convert to factors for CATALYST
+md$patient <- factor(md$patient, levels = unique(md$patient))
+md$patientcondition <- factor(md$patientcondition, levels = unique(md$patientcondition))
+md$condition <- factor(md$condition, levels = unique(md$condition))
+md$date <- factor(md$date, levels = unique(md$date))
+
+
+# Create panel annotations
+panel <- data.frame(as.character(sub_data_list[[1]]@parameters@data$name),as.character(sub_data_list[[1]]@parameters@data$desc))
+#rownames(panel) <- c(1:dim(panel)[1])
+panel$marker_class <- c("type")
+colnames(panel) <- c("fcs_colname", "antigen", "marker_class")
+panel[grep("TET|CD4",panel$antigen),]$marker_class <- c("state")
+panel[grep("CD45RA",panel$antigen),]$marker_class <- c("type")
+
+
+# Create single cell experiment object
+sce <- prepData(
+  fs,
+  panel = panel,
+  md = md,
+  md_cols = list(file = "file_name", id = "sample_id", factors = c("date", "patient", "condition", "patientcondition", "diffstate")),
+  features = panel$fcs_colname,
+  transform = TRUE,
+  cofactor = 150,
+  by_time = F, FACS = T
+)
+sce <- sce[, colData(sce)$condition == "BL"]
+
+#  Run tSNE
+set.seed(1260)
+sce <- runDR(sce, "TSNE", features = "type", cells = 100)
+
+# Clustering of Flow data
+sce <- CATALYST::cluster(sce, features = "type", xdim = 2, ydim = 2, maxK = 3, seed = 1234)
+
+# Merge clusters 1+4, 2+3
+recode_cluster_id <- recode(sce$cluster_id,
+                            "1" = "1",
+                            "4" = "1",
+                            "2" = "2",
+                            "3" = "2")
+
+sce$recode_cluster_id <- recode_cluster_id
+
+# Define coloring
+custom_colors <- c(
+  "1" <- "#00BFC4", 
+  "2" <-"#F8766D"
+)
+
+# Figures
+figure_3F_left <- plotDR(sce, dr = "TSNE", color_by = "recode_cluster_id") + geom_point(size=5.5) + 
+  scale_color_manual(values = custom_colors) +
+  theme_minimal(base_size = 12) +  
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)) # save 8x8
+
+cdx <- rownames(sce)[c(15, 8, 11, 16, 14, 3, 1, 9)]
+figure_3F_right<- plotDR(sce, "TSNE", scale = T, color_by = cdx, ncol = 4, a_pal = rev(hcl.colors(10, "Spectral"))) + geom_point(size=1.5)+   
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA))#18x12
+
+# Plot based on gating (effector/stem-like)
+figure_3G <- plotDR(sce, "TSNE", color_by = "diffstate",  ncol = 4) + geom_point(size=5.5) + theme_minimal(base_size = 12) +  
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA))+ 
+  facet_wrap(~"diffstate", ncol = 4)# save 8x8
+
+# Plot all markers
+cdx <- rownames(sce)[c(1,2,3,5,6,7,8,9,10,11,12,14,15,16)] #for all timepoints
+figure_S4 <- plotDR(sce, "TSNE", scale = T, color_by = cdx, ncol = 4, a_pal = rev(hcl.colors(10, "Spectral"))) + geom_point(size=1.5) #18x12
