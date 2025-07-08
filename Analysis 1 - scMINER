@@ -1,0 +1,95 @@
+### Script to analyse scRNA seq data with scMINER
+## This script generates the input for SJARACNE algorithm which is further processed in python 3.9
+# Load libraries
+library(scMINER)
+library(Seurat)
+
+set.seed(123)
+
+# Load the full seurat object
+seurat_obj <- readRDS(file =
+                        ".../hcv_flashseq_bl.rds")
+
+# Define a project directory where input will be created
+project_dir <- "scminer_analysis"
+dir.create(project_dir, showWarnings = FALSE)
+
+# Define the project space
+space <- createProjectSpace(
+  project_dir = project_dir,
+  project_name = "20250524_PHH_MAR3",
+  do.unlink = FALSE
+)
+print(space)
+
+# Create the sparse Eset object from the RNA counts data
+sco <- createSparseEset(
+  input_matrix = seurat_obj@assays$RNA$counts,
+  do.sparseConversion = TRUE,
+  cellData = seurat_obj@meta.data,
+  featureData = NULL,
+  annotation = file.path(space, "sparse_eset_annotation"),
+  projectID = "...",
+  addMetaData = TRUE)
+cat("SparseEset 'sco' created.\n")
+
+# QC
+drawSparseEsetQC(
+  sco,
+  file.path(space, "SparseEset_QC_Report.html"),
+  overwrite = TRUE,
+  group_by = "Timepoint")
+
+# Normalize input
+sco_normalized <- normalizeSparseEset(sco)
+
+# Define the directory for SJARACNe analysis
+sjaracne_base_dir <- file.path(space, "SJARACNe_analysis")
+dir.create(sjaracne_base_dir, showWarnings = FALSE)
+
+# Generate SJARACNe input with maximum 500 cells to even out conditions
+generateSJARACNeInput(
+  input_eset = sco_normalized,
+  group_name = "Timepoint",
+  sjaracne_dir = sjaracne_base_dir,
+  species_type = "hg",
+  driver_type = "TF",
+  downSample_N = 500
+)
+
+#### Run SJARACNe
+### This step is system-specific and needs manual intervention
+## Adapt the runSJARACNe.sh scripts for your system - LSF or local
+# Run bash scripts
+# (if tmp folder are not created automatically, manually insert them in the final folders)
+##### Example:
+# sjaracne local -e scminer_analysis/xxx/SJARACNe_analysis/acute/acute.11899_30.exp.txt
+# -g scminer_analysis/xxx/SJARACNe_analysis/acute/TF/acute.10_30.tf.txt
+# -o scminer_analysis/xxx/SJARACNe_analysis/acute/TF
+# -tmp scminer_analysis/xxx/SJARACNe_analysis/acute/tmp
+# -n 100 -pc 1e-2 -pb 1e-5
+
+# Analysis
+sjaracne_output_base_dir <- ".../SJARACNe_analysis"
+conditions <- unique(seurat_obj$Timepoint)
+
+# Network Quality Assessment
+network_stats <- drawNetworkQC(
+  sjaracne_dir = sjaracne_output_base_dir, # This should be the directory containing the time points
+  generate_html = TRUE # Set to TRUE to generate HTML reports
+)
+print(head(network_stats))
+
+# Activity Calculation
+activity_eset <- getActivity_inBatch(
+  input_eset = sco_normalized,
+  sjaracne_dir = sjaracne_output_base_dir,
+  group_name = "Timepoint",
+  driver_type = "TF",
+  activity_method = "mean",
+  do.z_normalization = TRUE
+)
+
+# Save activity Eset
+activity_eset_path <- file.path(space, "Activity_Eset.rds")
+saveRDS(activity_eset, file = activity_eset_path)
