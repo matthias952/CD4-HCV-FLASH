@@ -1,0 +1,41 @@
+library(Seurat)
+library(dplyr)
+
+# Define file paths
+input_dir <- 
+output_path <- 
+
+
+# Import expression and meta data
+expression_data <- read.csv(
+  file.path(input_dir, "CD4_filtered_expression_data.csv"),
+  row.names = 1,
+  check.names = FALSE
+)
+
+metadata <- read.csv(
+  file.path(input_dir, "CD4_filtered_metadata.csv"),
+  check.names = FALSE
+)
+
+# Filter out cells from the Sequencing data that were not sorted and included in the metadata file
+matching_cells <- intersect(colnames(expression_data), metadata$Identifier)
+filtered_raw_data <- expression_data[, matching_cells]
+
+# Create Seurat object
+hcv.flashseq <- CreateSeuratObject(counts = filtered_raw_data)
+
+metadata_columns <- c("well_id", "Plate", "row", "column", "Feature", "Timepoint", "Patient", "Naivestatus", "CTnt", "Tcell",
+                      "CD127.PB450.A", "CD45RA.PC7.A", "CCR7.KO525.A", "PD1.Violet610.A", "CD95.V780.A", "CD4.FITC.A")
+seurat_metadata_names <- c("Well", "Plate", "Row", "Column", "Epitop", "Timepoint", "Patient", "Naive", "TCRnt", "Tcell",
+                           "CD127_MFI", "CD45RA_MFI", "CCR7_MFI", "PD1_MFI", "CD95_MFI", "CD4_MFI")
+
+for (i in seq_along(metadata_columns)) {
+  hcv.flashseq@meta.data[[seurat_metadata_names[i]]] <- metadata[[metadata_columns[i]]][match(matching_cells, metadata$Identifier)]
+}
+
+# Remove control wells A1 and P12
+wells_to_remove <- c("A1", "P12")
+hcv.flashseq <- subset(hcv.flashseq, cells = which(!(hcv.flashseq@meta.data$Well %in% wells_to_remove)))
+
+saveRDS(hcv.flashseq, file = output_path)
