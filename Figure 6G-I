@@ -1,0 +1,245 @@
+### Figure 6G - 6I
+
+library(Seurat)
+library(scMINER)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(readr)
+library(Biobase)
+
+# Define color schemes
+timepoint_col <- c("FU" = "#FFC2C2", "SPR" = "#B2DFEE")
+
+# Load activity matrix
+activity_eset <- readRDS(".../activity_eset_cleaned.rds")
+activity_matrix <- exprs(activity_eset)
+
+# Load original Seurat object
+seurat_obj <- readRDS(
+  ".../hcv_flashseq_all.rds")
+
+# Match cells between objects
+common_cells <- intersect(colnames(activity_matrix), colnames(seurat_obj))
+activity_matrix <- activity_matrix[, common_cells]
+seurat_obj <- seurat_obj[, common_cells]
+
+# Clean gene names and add activity assay
+rownames(activity_matrix) <- gsub("_TF$", "", rownames(activity_matrix))
+seurat_obj[["Activity"]] <- CreateAssayObject(data = activity_matrix)
+
+
+# Figure H - TOX & TOX2 Expression
+
+# Filter for non-naive cells from FU and SPR timepoints
+seurat_subset <- subset(seurat_obj, subset = Naive != "Naive" & Timepoint %in% c("FU", "SPR"))
+Idents(seurat_subset) <- "Timepoint"
+
+# Plot TOX and TOX2 expression
+VlnPlot(seurat_subset, 
+        features = c("TOX", "TOX2"), 
+        ncol = 2, 
+        pt.size = 0.1, 
+        cols = timepoint_col) &
+  NoLegend() & 
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+# Statistical testing for expression
+expression_stats <- function(seurat_obj, genes, group1, group2) {
+  results <- data.frame()
+  
+  for (gene in genes) {
+    expr_data <- GetAssayData(seurat_obj, assay = "RNA", slot = "data")[gene, ]
+    cells_g1 <- WhichCells(seurat_obj, idents = group1)
+    cells_g2 <- WhichCells(seurat_obj, idents = group2)
+    
+    expr_g1 <- expr_data[cells_g1]
+    expr_g2 <- expr_data[cells_g2]
+    
+    wilcox_result <- wilcox.test(expr_g1, expr_g2, exact = FALSE)
+    
+    results <- rbind(results, data.frame(
+      Gene = gene,
+      Median_FU = median(expr_g1, na.rm = TRUE),
+      Median_SPR = median(expr_g2, na.rm = TRUE),
+      P_value = wilcox_result$p.value
+    ))
+  }
+  
+  results$P_value_Adjusted <- p.adjust(results$P_value, method = "BH")
+  return(results)
+}
+
+expr_results <- expression_stats(seurat_subset, c("TOX", "TOX2"), "FU", "SPR")
+print(expr_results)
+
+
+# Figure I - Differential Activity Analysis
+
+# Perform differential activity analysis
+da_results <- getDA(
+  input_eset = activity_eset,
+  group_by = "Timepoint",
+  g1 = "SPR",
+  g0 = "FU",
+  use_method = "t.test"
+)
+
+# Clean and filter results
+da_results$feature_basename <- gsub("_TF$", "", da_results$feature)
+da_results_filtered <- da_results %>% 
+  filter(g1_pct > 0, g0_pct > 0) %>%
+  mutate(significance = ifelse((abs(log2FC) > 0.25) & (Pval < 0.05), "Significant", "Not Significant"))
+
+# Get TF driver list and filter for TFs
+hg_driver_symbols <- getDriverList(species_type = "hg", driver_type = "TF")
+da_results_TF <- da_results_filtered[da_results_filtered$feature_basename %in% hg_driver_symbols, ]
+
+# Create volcano plot with all genes
+genes_to_label <- da_results_TF %>% filter(significance == "Significant")
+genes_to_label <- genes_to_label %>% filter(feature_basename %in% c("TOX", "TOX2", "STAT4", "BATF", "NFAT5", "EBF1", "ZEB1", "IKZF4", "KDM5A",
+                                                                    "ETS1", "KLF9", "RUNX3", "SMAD4", "BCL11B", "POU2F1",
+                                                                    "MYC", "KLF3", "STAT2", "LEF1", "IKZF1", "BCLAF1", "KLF6", "ZFP36", "FOXP1",
+                                                                    "FOXO3", "STAT1", "STAT6", "STAT5A", "STAT5B", "ID3", "TCF7", "NR4A3",
+                                                                    "KDM1A", "IRF7", "CREM", "NFATC2", "JUNB", "CTCF", "NR4A2"))
+
+volcano_plot <- ggplot(da_results_TF, aes(x = log2FC, y = -log10(Pval), color = significance)) +
+  geom_point(alpha = 0.7, size = 2.5) +
+  geom_text_repel(data = genes_to_label, aes(label = feature_basename), 
+                  size = 3.5, color = "black", max.overlaps = 5000, box.padding = 0.5) +
+  scale_color_manual(values = c("Significant" = "#E41A1C", "Not Significant" = "grey")) +
+  geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey50") +
+  labs(title = "Differential TF Activity: SPR vs FU",
+       x = "← Increased in FU | log2(Fold Change) | Increased in SPR →",
+       y = "-log10(P-value)") +
+  theme_minimal() +
+  theme(legend.position = "top", plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(volcano_plot)
+
+# Plot TOX activity
+VlnPlot(seurat_subset, 
+        features = c("TOX", "TOX2"), 
+        assay = "Activity", 
+        group.by = "Timepoint", 
+        pt.size = 0, 
+        cols = timepoint_col) &
+  NoLegend() & 
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+da_results_TF %>%
+  filter(feature_basename %in% c("TOX", "TOX2")) %>%
+  select(feature_basename, g1_tag, g0_tag, g1_avg, g0_avg, log2FC, Pval, FDR, significance) %>%
+  print()
+
+
+# Figure J - TOX Regulon Networks
+interaction_colors <- c(
+  "Positive" = "#D62728",  # Red for positive
+  "Negative" = "#1F77B4"   # Blue for negative
+)
+
+# Load TOX interactions
+csv_file_path <- ".../TOX_interactions.csv"
+tox_interactions <- read.csv(csv_file_path)
+
+# Convert back to the original list format for compatibility with existing code
+all_connections <- list()
+for (condition in unique(tox_interactions$condition)) {
+  all_connections[[condition]] <- tox_interactions %>% 
+    filter(condition == !!condition) %>%
+    select(-condition)  # Remove the condition column to match original format
+}
+
+# --- 3. Prepare Data for Plotting (Automated Counts) ---
+# Identify targets unique to each condition
+fu_targets <- all_connections[["FU"]]$to
+spr_targets <- all_connections[["SPR"]]$to
+fu_only_targets <- setdiff(fu_targets, spr_targets)
+spr_only_targets <- setdiff(spr_targets, fu_targets)
+
+# Dynamically count positive/negative interactions for UNIQUE targets
+counts <- list(
+  FU = list(
+    Positive = all_connections$FU %>% filter(to %in% fu_only_targets, interaction_type == "Positive") %>% nrow(),
+    Negative = all_connections$FU %>% filter(to %in% fu_only_targets, interaction_type == "Negative") %>% nrow()
+  ),
+  SPR = list(
+    Positive = all_connections$SPR %>% filter(to %in% spr_only_targets, interaction_type == "Positive") %>% nrow(),
+    Negative = all_connections$SPR %>% filter(to %in% spr_only_targets, interaction_type == "Negative") %>% nrow()
+  )
+)
+
+# --- 4. Plotting Function for Network Visualization ---
+generate_side_plot <- function(condition_name, origin_y_position = 0.5) {
+  # A. Set up layout
+  is_left_side <- condition_name == "FU"
+  bar_x <- if (is_left_side) -8 else 8
+  origin_x <- 0
+  label_x_offset <- if (is_left_side) -2.5 else 2.5
+  
+  # B. Select data for the chosen condition
+  condition_counts <- counts[[condition_name]]
+  total_genes <- sum(unlist(condition_counts))
+  
+  # C. Create data for the stacked bars
+  rect_data <- tibble(
+    type = c("Positive", "Negative"),
+    count = c(condition_counts$Positive, condition_counts$Negative),
+    color = c("#D62728", "#1F77B4")
+  ) %>%
+    mutate(
+      ymax = cumsum(count),
+      ymin = ymax - count,
+      xmin = bar_x - 0.5,
+      xmax = bar_x + 0.5
+    )
+  
+  # D. Create data for connecting lines from origin to the bars
+  origin_y_abs <- total_genes * origin_y_position
+  
+  positive_targets <- tibble(
+    type = "Positive",
+    yend = if(condition_counts$Positive > 0) seq(rect_data$ymin[1], rect_data$ymax[1], length.out = condition_counts$Positive) else numeric(0)
+  )
+  negative_targets <- tibble(
+    type = "Negative",
+    yend = if(condition_counts$Negative > 0) seq(rect_data$ymin[2], rect_data$ymax[2], length.out = condition_counts$Negative) else numeric(0)
+  )
+  
+  segment_data <- bind_rows(positive_targets, negative_targets) %>%
+    mutate(
+      x = origin_x,
+      y = origin_y_abs,
+      xend = if (is_left_side) bar_x + 0.5 else bar_x - 0.5, # Connect to the inner side of the bar
+      linetype = if_else(type == "Positive", "solid", "dashed")
+    )
+  
+  # E. Assemble the ggplot
+  p <- ggplot() +
+    geom_segment(data = segment_data, aes(x = x, y = y, xend = xend, yend = yend, linetype = linetype), color = "black", alpha = 0.7) +
+    geom_rect(data = rect_data, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = color), color = "black") +
+    annotate("text", x = bar_x, y = total_genes * 1.05, label = condition_name, size = 5, fontface = "bold") +
+    annotate("text", x = bar_x + label_x_offset, y = condition_counts$Positive / 2, label = "Positive", angle = 90, size = 4) +
+    annotate("text", x = bar_x + label_x_offset, y = condition_counts$Positive + (condition_counts$Negative / 2), label = "Negative", angle = 90, size = 4) +
+    scale_fill_identity() +
+    scale_linetype_identity() +
+    theme_void() +
+    coord_cartesian(
+      xlim = if (is_left_side) c(-10, 1) else c(-1, 10), 
+      ylim = c(0, total_genes * 1.1)
+    )
+  
+  return(p)
+}
+
+# --- 5. Generate and Display the Final Plots ---
+# The origin_y_position can be adjusted (0.5 = center, 0 = bottom, 1 = top)
+plot_fu <- generate_side_plot("FU", origin_y_position = 0.5)
+plot_spr <- generate_side_plot("SPR", origin_y_position = 0.5)
+
+# Print plots to the viewer (can be saved from there)
+print(plot_fu)
+print(plot_spr)
+
