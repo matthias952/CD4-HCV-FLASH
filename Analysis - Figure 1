@@ -1,0 +1,194 @@
+### Figure 1
+
+# Libraries
+library(ggplot2)
+library(Seurat)
+library(dplyr)
+library(AUCell)
+library(clusterProfiler) 
+library(tibble)
+library(ggpubr)
+library(patchwork)
+
+# Set seed
+set.seed(123)
+
+# Prepare a seurat object for nFeature bias linear regression
+prepare_noQC_object <- function(path) {
+  obj <- readRDS(file = path)
+  obj <- subset(obj, subset = nFeature_RNA > 50 & nFeature_RNA < 5000)
+  genes_to_remove <- grep(
+    pattern = "^(RPL|RPS|MT-)|(^TR[ABDG][VDJ])",
+    x = rownames(obj),
+    value = TRUE
+  )
+  obj <- obj[!rownames(obj) %in% genes_to_remove, ]
+  
+  obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
+  obj <- subset(obj, subset = CD14 < 0.001 & CD19 < 0.001 & MS4A7 < 0.001 & PPBP < 0.001)
+  
+  obj$cells <- paste0(obj$Plate, obj$Well)
+  obj$Timepoint <- factor(obj$Timepoint, levels = c("BL", "FU", "SPR", "acute"))
+  obj@meta.data[["Timepoint"]] <- droplevels(obj@meta.data[["Timepoint"]])
+  Idents(obj) <- "Timepoint"
+  return(obj)
+}
+
+# Import pre-processed object
+hcv_all <- readRDS(file =
+   ".../hcv_flashseq_all.rds")
+Idents(hcv_all) <- "Timepoint"
+hcv_all$cells <- paste0(hcv_all$Plate, hcv_all$Well)
+
+# Prepare noQC object
+hcv_noQC <- prepare_noQC_object(
+  path = ".../hcv_flashseq_cd4_A1P12.rds"
+)
+
+# Get expression matrices
+expr_all <- GetAssayData(hcv_all, assay = "RNA", slot = "data")
+expr_noQC <- GetAssayData(hcv_noQC, assay = "RNA", slot = "data")
+
+# Get GMT files
+gmt_files <- list.files(
+  "...", # path to gmt files
+  pattern = "\\.gmt$",
+  full.names = TRUE
+)
+
+# Build AUCell rankings
+rankings_all <- AUCell_buildRankings(expr_all, plotStats = FALSE)
+rankings_noQC <- AUCell_buildRankings(expr_noQC, plotStats = FALSE)
+
+# Loop through each gene set file
+for (gmt_file in gmt_files) {
+  set_name <- tools::file_path_sans_ext(basename(gmt_file))
+  gene_vector <- read.gmt(gmt_file) %>%
+    pull(gene) %>%
+    toupper() %>%
+    unique() %>%
+    intersect(rownames(expr_all))
+  
+  if (length(gene_vector) == 0) {
+    warning(paste("No overlapping genes for", set_name, ". Skipping..."))
+    next
+  }
+  
+  # Create the list structure for AUCell
+  gene_set_list <- list(gene_vector)
+  names(gene_set_list) <- set_name
+  
+  # Calculate scores for both objects
+  auc_all <- AUCell_calcAUC(gene_set_list, rankings_all)
+  auc_noQC <- AUCell_calcAUC(gene_set_list, rankings_noQC)
+  
+  scores_all_df <- as.data.frame(t(getAUC(auc_all))) %>%
+    rownames_to_column("CellID")
+  scores_noQC_df <- as.data.frame(t(getAUC(auc_noQC))) %>%
+    rownames_to_column("CellID")
+  
+  # Build linear model from the no-QC object
+  model_data <- hcv_noQC@meta.data %>%
+    rownames_to_column("CellID") %>%
+    left_join(scores_noQC_df, by = "CellID")
+  
+  lm_model <- lm(model_data[[set_name]] ~ model_data$nFeature_RNA)
+  
+  # Adjust scores in the main object
+  adjustment_data <- hcv_all@meta.data %>%
+    rownames_to_column("CellID") %>%
+    left_join(scores_all_df, by = "CellID")
+  
+  observed_scores <- adjustment_data[[set_name]]
+  predicted_scores <- lm_model$coefficients[1] + (adjustment_data$nFeature_RNA * lm_model$coefficients[2])
+  adjusted_scores <- observed_scores - predicted_scores
+  
+  # Add new scores to metadata
+  hcv_all[[paste0("AUCell_adjusted_", set_name)]] <- adjusted_scores
+}
+
+# Identify all UP/DN gene sets
+adjusted_cols <- grep("^AUCell_adjusted_", colnames(hcv_all@meta.data), value = TRUE)
+base_names <- unique(gsub("_(UP|DN)$", "", gsub("^AUCell_adjusted_", "", adjusted_cols)))
+
+for (base in base_names) {
+  up_col <- paste0("AUCell_adjusted_", base, "_UP")
+  down_col <- paste0("AUCell_adjusted_", base, "_DN")
+  
+  # Check if a pair exists
+  if (up_col %in% adjusted_cols && down_col %in% adjusted_cols) {
+    # Z-score normalize and subtract to create a composite score
+    up_z <- scale(hcv_all[[up_col, drop = TRUE]])
+    down_z <- scale(hcv_all[[down_col, drop = TRUE]])
+    hcv_all[[paste0("AUCell_composite_", base)]] <- up_z - down_z
+  }
+}
+
+final_features <- character()
+for (base in base_names) {
+  composite_col <- paste0("AUCell_composite_", base)
+  if (composite_col %in% colnames(hcv_all@meta.data)) {
+    final_features <- c(final_features, composite_col)
+  } else {
+    # If no composite, add the individual adjusted scores
+    final_features <- c(final_features, grep(paste0("^AUCell_adjusted_", base), adjusted_cols, value = TRUE))
+  }
+}
+final_features <- unique(final_features) # Ensure no duplicates
+
+# Figure S2C
+plot_object <- subset(hcv_all, subset = Naive != "Naive")
+
+VlnPlot(plot_object,
+        features = final_features,
+        group.by = "Timepoint",
+        pt.size = 0,
+        cols = c("#0000E2", "#B40000", "#FFC2C2", "#B2DFEE"),
+        ncol = 5
+) & NoLegend() & theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+# Figure 1 E
+# Perform Statistical Analysis
+stats_results_list <- list()
+metadata_subset <- plot_object@meta.data
+
+for (feature_name in final_features) {
+  # Perform pairwise Wilcoxon tests for post-hoc analysis
+  pairwise_result <- pairwise.wilcox.test(
+    metadata_subset[[feature_name]],
+    metadata_subset$Timepoint,
+    p.adjust.method = "BH"
+  )
+  
+  # Convert to data frame
+  p_values_df <- as.data.frame(as.table(pairwise_result$p.value))
+  colnames(p_values_df) <- c("Cluster1", "Cluster2", "P_adj_BH")
+  p_values_df$Feature <- feature_name
+  p_values_df <- na.omit(p_values_df)
+  
+  # Calculate median scores for each cluster
+  medians <- aggregate(
+    get(feature_name) ~ Timepoint,
+    data = metadata_subset,
+    FUN = median
+  )
+  colnames(medians) <- c("Cluster", "Median_Score")
+  
+  # Add the median scores for each compared cluster to the results table
+  p_values_df$Median_Cluster1 <- medians$Median_Score[match(p_values_df$Cluster1, medians$Cluster)]
+  p_values_df$Median_Cluster2 <- medians$Median_Score[match(p_values_df$Cluster2, medians$Cluster)]
+  
+  # Store the tidy data frame in the list
+  stats_results_list[[feature_name]] <- p_values_df
+}
+
+# Combine the list of data frames
+final_stats_df <- do.call(rbind, stats_results_list)
+rownames(final_stats_df) <- NULL
+
+# Reorder columns
+final_stats_df <- final_stats_df[, c("Feature", "Cluster1", "Cluster2", "Median_Cluster1", "Median_Cluster2", "P_adj_BH")]
+
+# Print final results table
+print(final_stats_df)
+
