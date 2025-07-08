@@ -1,0 +1,68 @@
+library(ggplot2)
+library(Seurat)
+library(dplyr)
+
+# Import raw Seurat Object
+hcv.flashseq <- readRDS(file =
+      ".../hcv_flashseq_cd4_A1P12.rds")
+
+## General QC
+# Feature counts and mitochondrial gene content
+hcv.flashseq[["percent.mt"]] <- PercentageFeatureSet(hcv.flashseq, pattern = "^MT-")
+
+# Inspect raw data
+VlnPlot(hcv.flashseq, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+# Filter out using 600 and 3500 features as cut-offs
+hcv.flashseq <- subset(hcv.flashseq, subset = nFeature_RNA > 600 & nFeature_RNA < 3500 & percent.mt < 50) 
+
+# Remove TCR, ribosomal and mitochondrial genes from downstream analysis
+genes_to_remove <- grep(pattern = "^(RPL|RPS|MT-)|(^TR[ABDG][VDJ])",
+                        x = rownames(hcv.flashseq),
+                        value = TRUE)
+hcv.flashseq <- hcv.flashseq[ ! rownames(hcv.flashseq) %in% genes_to_remove, ]
+
+# CD14, CD19, MS4A7 and PPBP can be confidently used to exclude monocytes, B cells, macrophages and neutrophils
+# CD14 can be found as protein but not mRNA in CD8 T cells
+hcv.flashseq <- NormalizeData(hcv.flashseq, normalization.method = "LogNormalize", scale.factor = 10000)
+VlnPlot(hcv.flashseq, features = c("CD14","CD19","MS4A7","PPBP"), ncol = 4, pt.size = 1.5)
+FeatureScatter(hcv.flashseq, feature1 = "PPBP", feature2 = "CD4")
+
+hcv.flashseq <- subset(hcv.flashseq, subset = CD14 < 0.001 & CD19 < 0.001 & MS4A7 < 0.001 & PPBP < 0.001)
+
+# Inspect data
+VlnPlot(hcv.flashseq, features = c("CD14","CD19","MS4A7","PPBP"), ncol = 5, pt.size = 1.5)
+
+
+## Subsetting and scaling
+# Figure 1, 2 and 6
+all_hcv.flashseq <- hcv.flashseq
+# Figure 3
+chronic_hcv.flashseq <- subset(hcv.flashseq, subset = Timepoint %in% c("BL", "FU"))
+# Figure 4
+baseline_hcv.flashseq <- subset(hcv.flashseq, subset = Timepoint == "BL")
+
+seurat_objects <- list(
+  all = all_hcv.flashseq,
+  baseline = baseline_hcv.flashseq,
+  bl_fu = chronic_hcv.flashseq
+)
+
+for (name in names(seurat_objects)) {
+  obj <- seurat_objects[[name]]
+  obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
+  obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 2000)
+  
+  # Regress out mitochondrial content and feature counts
+  obj <- ScaleData(obj,
+                   vars.to.regress = c("percent.mt", "nFeature_RNA"),
+                   features = rownames(obj))
+  
+  obj <- RunPCA(obj, features = VariableFeatures(object = obj))
+  seurat_objects[[name]] <- obj
+}
+
+# Save Seurat objects
+saveRDS(seurat_objects$all, file = ".../hcv_flashseq_all.rds")
+saveRDS(seurat_objects$baseline, file = ".../hcv_flashseq_bl.rds")
+saveRDS(seurat_objects$bl_fu, file = ".../hcv_flashseq_blfu.rds")
