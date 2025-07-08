@@ -1,0 +1,285 @@
+library(ggplot2)
+library(Seurat)
+library(dplyr)
+library(tibble)
+library(pheatmap)
+library(patchwork)
+library(ggrepel)
+library(clusterProfiler)
+library(AUCell)
+library(ggpubr)
+library(tidyr)
+
+
+set.seed(123)
+
+# Prepare a seurat object for nFeature bias linear regression
+prepare_noQC_object <- function(path) {
+  obj <- readRDS(file = path)
+  obj <- subset(obj, subset = nFeature_RNA > 50 & nFeature_RNA < 5000)
+  genes_to_remove <- grep("^(RPL|RPS|MT-)|(^TR[ABDG][VDJ])", rownames(obj), value = TRUE)
+  obj <- obj[!rownames(obj) %in% genes_to_remove, ]
+  obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
+  obj <- subset(obj, subset = CD14 < 0.05 & CD19 < 0.05 & MS4A7 < 0.05 & PPBP < 0.01)
+  obj$cells <- paste0(obj$Plate, obj$Well)
+  return(obj)
+}
+
+# Run AUCell GSEA with nFeature correction
+run_aucell_gsea <- function(main_seu, no_qc_seu, gmt_path) {
+  # Get expression data and build rankings
+  expr_main <- GetAssayData(main_seu, assay = "RNA", slot = "data")
+  expr_no_qc <- GetAssayData(no_qc_seu, assay = "RNA", slot = "data")
+  rankings_main <- AUCell_buildRankings(expr_main, plotStats = FALSE)
+  rankings_no_qc <- AUCell_buildRankings(expr_no_qc, plotStats = FALSE)
+  
+  gmt_files <- list.files(gmt_path, pattern = "\\.gmt$", full.names = TRUE)
+  
+  for (gmt_file in gmt_files) {
+    set_name <- tools::file_path_sans_ext(basename(gmt_file))
+    gene_vector <- read.gmt(gmt_file) %>% pull(gene) %>% toupper() %>% unique() %>% intersect(rownames(expr_main))
+    
+    if (length(gene_vector) == 0) next
+    
+    gene_set_list <- list(gene_vector); names(gene_set_list) <- set_name
+    
+    # Calculate scores
+    scores_main <- as.data.frame(t(getAUC(AUCell_calcAUC(gene_set_list, rankings_main)))) %>% rownames_to_column("CellID")
+    scores_no_qc <- as.data.frame(t(getAUC(AUCell_calcAUC(gene_set_list, rankings_no_qc)))) %>% rownames_to_column("CellID")
+    
+    # Build linear model and adjust scores
+    model_data <- no_qc_seu@meta.data %>% rownames_to_column("CellID") %>% left_join(scores_no_qc, by = "CellID")
+    lm_model <- lm(model_data[[set_name]] ~ model_data$nFeature_RNA)
+    
+    adjustment_data <- main_seu@meta.data %>% rownames_to_column("CellID") %>% left_join(scores_main, by = "CellID")
+    predicted_scores <- lm_model$coefficients[1] + (adjustment_data$nFeature_RNA * lm_model$coefficients[2])
+    main_seu[[paste0("AUCell_adjusted_", set_name)]] <- adjustment_data[[set_name]] - predicted_scores
+  }
+  
+  # Calculate composite scores
+  adjusted_cols <- grep("^AUCell_adjusted_", colnames(main_seu@meta.data), value = TRUE)
+  base_names <- unique(gsub("_(UP|DN)$", "", gsub("^AUCell_adjusted_", "", adjusted_cols)))
+  
+  for (base in base_names) {
+    up_col <- paste0("AUCell_adjusted_", base, "_UP")
+    down_col <- paste0("AUCell_adjusted_", base, "_DN")
+    if (up_col %in% adjusted_cols && down_col %in% adjusted_cols) {
+      up_z <- scale(main_seu[[up_col, drop = TRUE]])
+      down_z <- scale(main_seu[[down_col, drop = TRUE]])
+      main_seu[[paste0("AUCell_composite_", base)]] <- up_z - down_z
+    }
+  }
+  return(main_seu)
+}
+
+# Import pre-processed object
+subset_hcv.flashseq <- readRDS(file =
+        ".../hcv_flashseq_all.rds")
+
+# Inspect PCAs for dimensionality reduction
+ElbowPlot(subset_hcv.flashseq, ndims = 50)
+
+# Use first 20 PCs
+subset_hcv.flashseq <- FindNeighbors(subset_hcv.flashseq, dims = 1:20)
+subset_hcv.flashseq <- FindClusters(subset_hcv.flashseq, resolution = 0.8, algorithm = 4)
+subset_hcv.flashseq <- RunUMAP(subset_hcv.flashseq, dims = 1:20, n.neighbors = 20, min.dist = 0.0001)
+
+# Figure 2A
+clust.col = c("#A0A0A0", "#65C765", "#C1E9C1", "#464646", "#E1E1E1", "#359335")
+DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, cols = clust.col, pt.size = 1.3, group.by = "seurat_clusters", order = F)
+
+# Figure 2B
+gene_list <- c("ZEB2", "DUSP4", "CD74", "PRDM1", "STAT1", "CD38", "HLA-DRA", "PDCD1", "CCL5","NKG7",
+               "IL32", "ISG15", "KLRB1", "CCR5", "GZMA", "CX3CR1", "MKI67", 
+               "MAF", "AMFR", "CD52",  "EBF1",
+               "CXCL13", "CTLA4", "GNG4", "LAG3", "PTPN13", "TOX", "TOX2",
+               "IGF2R", "CXCR4", "ZFP36", "KLF6", "TNFAIP3","CREM", "NR4A3", "FOSL2", "PTGER4", "CD69", "JUNB", "JUN",
+               "BCL2", "TCF7", "FOXO1", "IL7R", "SELL", "FOS", "CCR7", "LEF1", "MYC", "PTGER2")
+
+# Re-order seurat clusters
+subset_hcv.flashseq@meta.data$seurat_clusters <- factor(subset_hcv.flashseq@meta.data$seurat_clusters, levels = c("4", "1", "5", "3", "6", "2"))
+
+# Create expression data frame
+variable_meta <- "seurat_clusters"
+expression_data <- GetAssayData(subset_hcv.flashseq, assay = "RNA", slot = "data")[gene_list, , drop = FALSE]
+meta_data <- subset_hcv.flashseq@meta.data[, variable_meta, drop = FALSE]
+heatmap_data <- as.data.frame(t(as.matrix(expression_data))) %>%
+  mutate(Cluster = meta_data[[variable_meta]]) %>%
+  group_by(Cluster) %>%
+  summarise(across(all_of(gene_list), mean, na.rm = TRUE), .groups = 'drop') %>%
+  as.data.frame() %>% column_to_rownames(var = "Cluster") %>% t()
+
+# Prepare final heatmap data
+cluster_order <- levels(subset_hcv.flashseq$seurat_clusters)
+heatmap_data <- heatmap_data[, cluster_order, drop = FALSE]
+pheatmap(heatmap_data, cluster_rows = F,
+         cluster_cols = F, color = colorRampPalette(c("white", "grey80", "red"))(50),
+         scale = "row", 
+         main = "Average Gene Expression by Seurat Cluster", fontsize_row = 10, fontsize_col = 10)
+
+# Figure 2C
+subset_hcv.flashseq$cells <- paste0(subset_hcv.flashseq$Plate, subset_hcv.flashseq$Well)
+hcv_noQC <- prepare_noQC_object(".../hcv_flashseq_cd4_A1P12.rds")
+subset_hcv.flashseq <- run_aucell_gsea(subset_hcv.flashseq, hcv_noQC, ".../Genesets/Fig 2C/")
+composite_cols_2c <- grep("^AUCell_composite_", colnames(subset_hcv.flashseq@meta.data), value = TRUE)
+FeaturePlot(subset_hcv.flashseq, features = composite_cols_2c, pt.size = 1.3, ncol = 1, order = TRUE, cols = c("grey90", "red3"), min.cutoff = "q5", max.cutoff = "q95")
+
+
+# Figure 2D
+FeaturePlot(subset_hcv.flashseq, features = c("BCL2", "CCR7", "ISG15", "CD52"),
+            min.cutoff = "q5", max.cutoff = "q95",
+            cols = c("grey90","red3"), pt.size = 1.3, ncol = 2, order = T) &
+            NoLegend() &
+            theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+# Figure 2E
+subset_hcv.flashseq@meta.data <- subset_hcv.flashseq@meta.data[, !grepl("^AUCell_", colnames(subset_hcv.flashseq@meta.data))]
+subset_hcv.flashseq <- run_aucell_gsea(subset_hcv.flashseq, hcv_noQC, ".../Genesets/Fig 2E/")
+
+# Extract AUCell scores
+all_adj_cols <- grep("^AUCell_adjusted_", colnames(subset_hcv.flashseq@meta.data), value = TRUE)
+all_comp_cols <- grep("^AUCell_composite_", colnames(subset_hcv.flashseq@meta.data), value = TRUE)
+base_names <- unique(gsub("_(UP|DN)$", "", gsub("^AUCell_adjusted_", "", all_adj_cols)))
+final_features_vector <- sapply(base_names, function(base) {
+  comp_col <- paste0("AUCell_composite_", base)
+  if (comp_col %in% all_comp_cols) return(comp_col)
+  else return(grep(paste0("^AUCell_adjusted_", base), all_adj_cols, value = TRUE)[1])
+}, USE.NAMES = FALSE)
+
+# Perform statistics - one vs rest
+meta_data_subset <- subset_hcv.flashseq@meta.data
+results_list <- lapply(final_features_vector, function(sig) {
+  lapply(levels(meta_data_subset$seurat_clusters), function(cl) {
+    in_scores <- meta_data_subset[meta_data_subset$seurat_clusters == cl, sig]
+    out_scores <- meta_data_subset[meta_data_subset$seurat_clusters != cl, sig]
+    p_val <- tryCatch(wilcox.test(in_scores, out_scores)$p.value, error = function(e) NA)
+    data.frame(Signature = sig, Cluster = cl, Mean_AUCell_Score = mean(in_scores, na.rm = TRUE), p_value = p_val)
+  }) %>% bind_rows()
+}) %>% bind_rows()
+
+# Create plotting data frame
+plot_data <- results_list %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH"),
+         neg_log10_p_adj = -log10(p_adj + 1e-300),
+         Signature_Clean = gsub("AUCell_(composite_)?(adjusted_)?", "", Signature)) %>%
+  group_by(Signature_Clean) %>%
+  mutate(Mean_AUCell_Score_Scaled = scale(Mean_AUCell_Score)) %>%
+  ungroup()
+
+# Hierarchical clustering on signatures
+signature_matrix <- plot_data %>%
+  select(Signature_Clean, Cluster, Mean_AUCell_Score_Scaled) %>%
+  pivot_wider(names_from = Cluster, values_from = Mean_AUCell_Score_Scaled) %>%
+  column_to_rownames("Signature_Clean")
+hclust_result <- hclust(dist(signature_matrix))
+clustered_signature_order <- hclust_result$labels[hclust_result$order]
+
+# Factorize
+plot_data$Signature_Clean <- factor(plot_data$Signature_Clean, levels = rev(clustered_signature_order))
+plot_data$Cluster <- factor(plot_data$Cluster, levels = levels(subset_hcv.flashseq$seurat_clusters))
+
+# Dot plot
+ggplot(plot_data, aes(x = Cluster, y = Signature_Clean)) +
+  geom_point(aes(color = Mean_AUCell_Score_Scaled, size = neg_log10_p_adj)) +
+  scale_color_gradient2(low = "grey80", mid = "grey50", high = "red3", midpoint = 0, name = "Scaled Score\n(Z-score)") +
+  scale_size_continuous(name = "-log10(adj. p-value)", range = c(2, 8)) +
+  labs(title = "Clustered Signature Enrichment by Cluster", x = "Seurat Cluster", y = "Gene Signature") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10), axis.text.y = element_text(size = 9))
+
+# Figure 2F
+timepoint_col = c("#0000E2", "#B40000", "#FFC2C2", "#B2DFEE")
+DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, cols = timepoint_col, pt.size = 1.3, group.by = "Timepoint", order = F)
+
+# Figure 2G
+proportions_df <- subset_hcv.flashseq@meta.data %>%
+  count(Timepoint, seurat_clusters) %>%
+  group_by(Timepoint) %>%
+  mutate(Proportion = n / sum(n) * 100) %>%
+  ungroup()
+ggplot(proportions_df, aes(x = Timepoint, y = Proportion, fill = seurat_clusters)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = clust.col) +
+  labs(title = "Proportion of Seurat Clusters per Timepoint", y = "Proportion (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("#464646", "#A0A0A0", "#E1E1E1", "#C1E9C1", "#359335", "#65C765"))
+
+# Supplementary figure 3 A - patient UMAP
+DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "Patient", order = F)
+
+# Supplementary figure 3 B - volanco plots by cluster
+variable_meta <- "seurat_clusters"
+Idents(subset_hcv.flashseq) <- variable_meta
+
+# Find differentially expressed genes
+all_deg_results <- FindAllMarkers(subset_hcv.flashseq, group.by = "seurat_clusters", min.pct = 0, log2FC_threshold = 0)
+
+# Volcano plot parameters
+log2FC_threshold <- 0.5
+p_val_threshold <- 0.05
+
+
+# Define genes to label
+cluster_specific_labels <- list(
+"1" = c("CD52", "B2M", "MKI67", "CD3D", "S100A6", "PFN1", "ISG15", "IFITM1", "MAL", "NLRP1", "ZFP36L2", "CD37", "DUSP1", "CCR7", "SOCS3", "TGFB1", "CD5"),
+"2" = c("FOS", "FOSB", "CCR7", "MAL", "IL7R", "PTGER2", "MYC", "SOCS3", "LEF1", "NELL2", "BCL2", "FOXO1", "CD52",
+              "DUSP4", "HLA-DRA", "CXCL13", "TOX2", "TOX", "ZEB2", "PDCD1", "ISG15", "IKZF1"),
+"3" = c("CD52", "PTPN13", "IL32", "NELL2", "LAG3", "BCL2", "TNFSF8", "STAT3", "GNG4", "HLA-DRA", "NR4A2", "GZMA",
+              "ISG15", "CD74", "JUN"),
+"4" = c("CD74", "HLA-DRA", "IL32", "KLRB1", "ISG15", "ZEB2", "CD38", "TBX21", "IRF7", "TNFRSF1B",
+              "STAT1", "SELL", "CCR7", "CXCR4", "BCL2", "NELL2", "IGF2R"),
+"5" = c("TMTC4", "RN7SL1", "CD52", "PDCD4", "SOX11", "DUSP1", "CD2", "FOS", "CCR7"),
+"6" = c("MIR23AHG", "JUDN", "TNFAIP3", "NR4A2", "KLF6", "CXCR4", "NR4A3", "IFITM3", "KLF3", "HLA-DRA", "PRDM1", "STAT1", "FOXP1")
+)
+
+plot_list <- list()
+for (cluster_name in unique(all_deg_results$cluster)) {
+  
+  comparison_data <- all_deg_results %>%
+    filter(cluster == cluster_name)
+  
+  comparison_data <- comparison_data %>%
+    mutate(
+      significance = ifelse((avg_log2FC > log2FC_threshold | avg_log2FC < -log2FC_threshold) & p_val_adj < p_val_threshold, "Significant", "Not Significant")
+    )
+  
+  current_label_list <- cluster_specific_labels[[as.character(cluster_name)]]
+  
+  genes_to_label <- comparison_data %>%
+    filter(
+      gene %in% current_label_list & 
+        significance == "Significant"
+    )
+  
+  # Create volcano plot 🌋
+  volcano_plot <- ggplot(comparison_data, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+    geom_point(aes(color = significance), alpha = 0.8, size = 2.5) +
+    geom_text_repel(
+      data = genes_to_label, # Use the new custom list of genes to label
+      aes(label = gene),
+      color = "black",
+      size = 3.5,
+      fontface = "bold",
+      max.overlaps = 15,
+      box.padding = 0.5,
+      point.padding = 0.5,
+      segment.color = "grey50"
+    ) +
+    scale_color_manual(values = c("Significant" = "red", "Not Significant" = "grey"), name = "") +
+    geom_vline(xintercept = c(-log2FC_threshold, log2FC_threshold), linetype = "dashed", color = "blue") +
+    geom_hline(yintercept = -log10(p_val_threshold), linetype = "dashed", color = "blue") +
+    labs(
+      title = paste("DEGs for Cluster", cluster_name),
+      x = "Log2 Fold Change",
+      y = "-Log10 Adjusted P-value"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "top")
+  
+  plot_list[[as.character(cluster_name)]] <- volcano_plot
+}
+
+
+print(plot_list[[1]])
+
