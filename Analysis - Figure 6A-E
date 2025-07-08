@@ -1,0 +1,286 @@
+# Figure 6A to 6E
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(tibble)
+library(purrr)
+library(rstatix)
+library(AUCell)
+library(clusterProfiler)
+
+# Functions
+prepare_noQC_object <- function(path) {
+  obj <- readRDS(file = path)
+  obj <- subset(obj, subset = nFeature_RNA > 50 & nFeature_RNA < 5000)
+  genes_to_remove <- grep("^(RPL|RPS|MT-)|(^TR[ABDG][VDJ])", rownames(obj), value = TRUE)
+  obj <- obj[!rownames(obj) %in% genes_to_remove, ]
+  obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
+  obj <- subset(obj, subset = CD14 < 0.05 & CD19 < 0.05 & MS4A7 < 0.05 & PPBP < 0.01)
+  obj$cells <- paste0(obj$Plate, obj$Well)
+  return(obj)
+}
+
+run_aucell_gsea <- function(main_seu, no_qc_seu, gmt_path) {
+  expr_main <- GetAssayData(main_seu, assay = "RNA", slot = "data")
+  expr_no_qc <- GetAssayData(no_qc_seu, assay = "RNA", slot = "data")
+  rankings_main <- AUCell_buildRankings(expr_main, plotStats = FALSE)
+  rankings_no_qc <- AUCell_buildRankings(expr_no_qc, plotStats = FALSE)
+  
+  gmt_files <- list.files(gmt_path, pattern = "\\.gmt$", full.names = TRUE)
+  
+  for (gmt_file in gmt_files) {
+    set_name <- tools::file_path_sans_ext(basename(gmt_file))
+    gene_vector <- read.gmt(gmt_file) %>% pull(gene) %>% toupper() %>% unique() %>% intersect(rownames(expr_main))
+    if (length(gene_vector) == 0) next
+    gene_set_list <- list(gene_vector); names(gene_set_list) <- set_name
+    
+    scores_main <- as.data.frame(t(getAUC(AUCell_calcAUC(gene_set_list, rankings_main)))) %>% rownames_to_column("CellID")
+    scores_no_qc <- as.data.frame(t(getAUC(AUCell_calcAUC(gene_set_list, rankings_no_qc)))) %>% rownames_to_column("CellID")
+    
+    model_data <- no_qc_seu@meta.data %>% rownames_to_column("CellID") %>% left_join(scores_no_qc, by = "CellID")
+    lm_model <- lm(model_data[[set_name]] ~ model_data$nFeature_RNA)
+    
+    adjustment_data <- main_seu@meta.data %>% rownames_to_column("CellID") %>% left_join(scores_main, by = "CellID")
+    predicted_scores <- lm_model$coefficients[1] + (adjustment_data$nFeature_RNA * lm_model$coefficients[2])
+    main_seu[[paste0("AUCell_adjusted_", set_name)]] <- adjustment_data[[set_name]] - predicted_scores
+  }
+  
+  adjusted_cols <- grep("^AUCell_adjusted_", colnames(main_seu@meta.data), value = TRUE)
+  base_names <- unique(gsub("_(UP|DN)$", "", gsub("^AUCell_adjusted_", "", adjusted_cols)))
+  
+  for (base in base_names) {
+    up_col <- paste0("AUCell_adjusted_", base, "_UP")
+    down_col <- paste0("AUCell_adjusted_", base, "_DN")
+    if (up_col %in% adjusted_cols && down_col %in% adjusted_cols) {
+      up_z <- scale(main_seu[[up_col, drop = TRUE]])
+      down_z <- scale(main_seu[[down_col, drop = TRUE]])
+      main_seu[[paste0("AUCell_composite_", base)]] <- up_z - down_z
+    }
+  }
+  return(main_seu)
+}
+
+# Load complete seurat object
+subset_hcv.flashseq <- readRDS(file = ".../hcv_flashseq_all.rds")
+
+# Fibure 6A - DEG Heatmap
+variable_meta <- "Timepoint"
+Idents(subset_hcv.flashseq) <- "Timepoint"
+conditions <- unique(subset_hcv.flashseq@meta.data[[variable_meta]])
+combinations <- combn(conditions, 2)
+
+# Calculate DEGs with at least 2 fold change and 10 percent expression
+deg_results_list <- lapply(1:ncol(combinations), function(i) {
+  ident1 <- combinations[1, i]
+  ident2 <- combinations[2, i]
+  
+  # Using FindMarkers for the comparison
+  markers <- FindMarkers(
+    subset_hcv.flashseq,
+    ident.1 = ident1,
+    ident.2 = ident2,
+    logfc.threshold = 1.0, 
+    min.pct = 0.1,         
+    test.use = "wilcox"      
+  )
+  # Add gene names and comparison info to the results
+  markers$gene <- rownames(markers)
+  markers$comparison <- paste0(ident1, "_vs_", ident2)
+  return(markers)
+})
+
+# Combine into single data frame
+all_deg_results <- bind_rows(deg_results_list)
+
+# Filter results
+all_deg_results_sig <- all_deg_results %>%
+  filter(p_val_adj < 0.05) %>%
+  filter(!grepl("^TR[ABDG]V", gene)) %>%
+  filter(!grepl("^ENSG", gene)) %>%
+  distinct(gene) %>%
+  slice_head(n = 300) %>%
+  pull(gene)
+
+# Create expression matrix for heatmap
+expression_matrix <- subset(subset_hcv.flashseq, features = all_deg_results_sig)
+expr_data <- GetAssayData(expression_matrix, slot = "data")  
+expr_data_scaled <- scale(t(expr_data)) 
+
+# Cluster genes
+distance_matrix <- dist(t(expr_data_scaled))
+cluster_result <- hclust(distance_matrix, method = "average")
+ordered_genes <- rownames(expr_data)[cluster_result$order]
+
+# Final heatmap
+DoHeatmap(expression_matrix, features = ordered_genes, 
+          group.by = "Timepoint",
+          cells = NULL) + theme(axis.text.y = element_text(size = 6))
+
+
+# Figure 6B - MDS Plot
+# Pseudobulk expression data
+avg_expression <- AggregateExpression(subset_hcv.flashseq, group.by = "Timepoint", assays = "RNA")
+rna_avg_expression <- avg_expression$RNA
+
+# Perform Multidimensional Scaling (MDS)
+mds_result <- t(rna_avg_expression) %>% 
+  dist() %>% 
+  cmdscale(k = 2) %>%
+  as.data.frame() %>%
+  setNames(c("MDS1", "MDS2")) %>%
+  rownames_to_column("Timepoint")
+
+# Define colors
+timepoint_colors <- c("acute" = "#0000E2", "BL" = "#B40000", "FU" = "#FFC2C2", "SPR" = "#B2DFEE")
+
+# Final plot
+ggplot(mds_result, aes(x = MDS1, y = MDS2, color = Timepoint)) +
+  geom_point(size = 6, alpha = 0.8) +
+  scale_color_manual(values = timepoint_colors) +
+  labs(title = "MDS Plot of Timepoints") +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "none",
+    axis.title = element_blank(), 
+    axis.text = element_blank(), 
+    axis.ticks = element_blank()
+  )
+
+
+# Figure 6D - GSEA AUCell
+hcv_noQC <- prepare_noQC_object(".../hcv_flashseq_cd4_A1P12.rds")
+subset_hcv.flashseq$cells <- paste0(subset_hcv.flashseq$Plate, subset_hcv.flashseq$Well)
+subset_hcv.flashseq <- run_aucell_gsea(subset_hcv.flashseq, hcv_noQC, ".../Genesets/Fig6D")
+
+all_adjusted_cols <- grep("^AUCell_adjusted_", colnames(subset_hcv.flashseq@meta.data), value = TRUE)
+all_composite_cols <- grep("^AUCell_composite_", colnames(subset_hcv.flashseq@meta.data), value = TRUE)
+base_names <- unique(gsub("_(UP|DN)$", "", gsub("^AUCell_adjusted_", "", all_adjusted_cols)))
+
+features_to_plot <- map_chr(base_names, ~{
+  composite_name <- paste0("AUCell_composite_", .x)
+  if (composite_name %in% all_composite_cols) {
+    return(composite_name)
+  }
+  # Fallback to the first adjusted score if no composite exists
+  grep(paste0("^AUCell_adjusted_", .x), all_adjusted_cols, value = TRUE)[1]
+})
+
+# Reorder features as in the original script
+feature_order <- c(3, 1, 4, 5, 2, 6)
+features_to_plot <- features_to_plot[feature_order]
+
+# Step 4: Generate violin plots
+VlnPlot(
+  subset(subset_hcv.flashseq, subset = Naive != "Naive" & Timepoint %in% c("FU", "SPR")),
+  features = features_to_plot,
+  group.by = "Timepoint",
+  pt.size = 0,
+  cols = timepoint_colors,
+  ncol = 3
+) & NoLegend() & theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+stats_df_6d <- purrr::map_dfr(features_to_plot, ~{
+  # Get non-naive cells for FU and SPR timepoints
+  non_naive_cells <- WhichCells(subset_hcv.flashseq, expression = Naive != "Naive")
+  
+  # Extract cells for each timepoint
+  fu_cells <- intersect(WhichCells(subset_hcv.flashseq, expression = Timepoint == "FU"), non_naive_cells)
+  spr_cells <- intersect(WhichCells(subset_hcv.flashseq, expression = Timepoint == "SPR"), non_naive_cells)
+  
+  # Extract AUCell scores
+  scores_fu <- subset_hcv.flashseq@meta.data[fu_cells, .x]
+  scores_spr <- subset_hcv.flashseq@meta.data[spr_cells, .x]
+  
+  # Perform Wilcoxon rank sum test
+  res <- wilcox.test(scores_fu, scores_spr)
+  
+  tibble(
+    Feature = .x,
+    p_value = res$p.value,
+    median_FU = median(scores_fu, na.rm = TRUE),
+    median_SPR = median(scores_spr, na.rm = TRUE)
+  )
+}) %>% 
+  mutate(p_adj_BH = p.adjust(p_value, method = "BH"))
+
+print("Statistics for Figure 6D AUCell Scores:")
+print(stats_df_6d)
+
+
+# Figure 6E
+genes_fig6e <- c("CCR7", "TCF7", "LEF1", "PTPN13", "PDCD1", "TIGIT")
+
+# Plotting
+VlnPlot(
+  subset(subset_hcv.flashseq, subset = Naive != "Naive" & Timepoint %in% c("FU", "SPR")),
+  features = genes_fig6e,
+  ncol = 3,
+  pt.size = 0, # 0.1 for PTPN13 and PDCD1
+  cols = timepoint_colors
+) & NoLegend() & theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+stats_df_6e <- purrr::map_dfr(genes_fig6e, ~{
+  # Get expression data for the gene
+  dat <- GetAssayData(subset_hcv.flashseq, assay = "RNA", slot = "data")[.x, ]
+  
+  # Get non-naive cells for FU and SPR timepoints
+  non_naive_cells <- WhichCells(subset_hcv.flashseq, expression = Naive != "Naive")
+  fu_cells <- intersect(WhichCells(subset_hcv.flashseq, expression = Timepoint == "FU"), non_naive_cells)
+  spr_cells <- intersect(WhichCells(subset_hcv.flashseq, expression = Timepoint == "SPR"), non_naive_cells)
+  
+  # Perform Wilcoxon rank sum test
+  res <- wilcox.test(dat[fu_cells], dat[spr_cells])
+  
+  tibble(
+    Gene = .x,
+    p_value = res$p.value,
+    median_FU = median(dat[fu_cells], na.rm = TRUE),
+    median_SPR = median(dat[spr_cells], na.rm = TRUE)
+  )
+}) %>% 
+  mutate(p_adj_BH = p.adjust(p_value, method = "BH"))
+
+print("Statistics for Figure 6E Gene Expression:")
+print(stats_df_6e)
+
+
+# Figure 6G
+genes_fig6g <- c("TOX", "TOX2")
+
+# Plotting
+VlnPlot(
+  subset(subset_hcv.flashseq, subset = Naive != "Naive" & Timepoint %in% c("FU", "SPR")),
+  features = genes_fig6g,
+  ncol = 1, 
+  pt.size = 0, # 0.1 for TOX2
+  cols = timepoint_colors
+) & NoLegend() & theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+stats_df_6g <- purrr::map_dfr(genes_fig6g, ~{
+  # Get expression data for the gene
+  dat <- GetAssayData(subset_hcv.flashseq, assay = "RNA", slot = "data")[.x, ]
+  
+  # Get non-naive cells for FU and SPR timepoints
+  non_naive_cells <- WhichCells(subset_hcv.flashseq, expression = Naive != "Naive")
+  fu_cells <- intersect(WhichCells(subset_hcv.flashseq, expression = Timepoint == "FU"), non_naive_cells)
+  spr_cells <- intersect(WhichCells(subset_hcv.flashseq, expression = Timepoint == "SPR"), non_naive_cells)
+  
+  # Perform Wilcoxon rank sum test
+  res <- wilcox.test(dat[fu_cells], dat[spr_cells])
+  
+  tibble(
+    Gene = .x,
+    p_value = res$p.value,
+    median_FU = median(dat[fu_cells], na.rm = TRUE),
+    median_SPR = median(dat[spr_cells], na.rm = TRUE)
+  )
+}) %>% 
+  mutate(p_adj_BH = p.adjust(p_value, method = "BH"))
+
+print("Statistics for Figure 6G Gene Expression:")
+print(stats_df_6g)
+
+
