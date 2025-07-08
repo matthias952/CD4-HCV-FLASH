@@ -1,0 +1,303 @@
+### Figure 4
+
+library(ggplot2)
+library(Seurat)
+library(dplyr)
+library(patchwork)
+library(ggrepel)
+library(rstatix)
+library(pheatmap)
+
+## First repeat the clustering of figure 3
+# Load BL object 
+subset_hcv.flashseq <- readRDS(file = ".../hcv_flashseq_bl.rds")
+
+# Clustering
+subset_hcv.flashseq <- FindNeighbors(subset_hcv.flashseq, dims = 1:10)
+subset_hcv.flashseq <- FindClusters(subset_hcv.flashseq, resolution = 0.6, algorithm = 4)
+subset_hcv.flashseq <- RunUMAP(subset_hcv.flashseq, dims = 1:10, n.neighbors = 20, min.dist = 0.01)
+DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "seurat_clusters", order = F)
+
+# Define shared clones for cluster 1 and cluster 2
+meta_data <- subset_hcv.flashseq@meta.data
+cluster1_tcr <- meta_data$TCRnt[meta_data$seurat_clusters == 1]
+cluster2_tcr <- meta_data$TCRnt[meta_data$seurat_clusters == 2]
+cluster1_tcr <- cluster1_tcr[!is.na(cluster1_tcr)]
+cluster2_tcr <- cluster2_tcr[!is.na(cluster2_tcr)]
+unique_cluster1_tcr <- unique(cluster1_tcr)
+unique_cluster2_tcr <- unique(cluster2_tcr)
+shared_clones <- intersect(unique_cluster1_tcr, unique_cluster2_tcr)
+unique_to_cluster1 <- setdiff(unique_cluster1_tcr, unique_cluster2_tcr)
+unique_to_cluster2 <- setdiff(unique_cluster2_tcr, unique_cluster1_tcr)
+
+cells_unique_cluster1 <- sum(meta_data$seurat_clusters == 1 & 
+                               meta_data$TCRnt %in% unique_to_cluster1 & 
+                               !is.na(meta_data$TCRnt))
+cells_unique_cluster2 <- sum(meta_data$seurat_clusters == 2 & 
+                               meta_data$TCRnt %in% unique_to_cluster2 & 
+                               !is.na(meta_data$TCRnt))
+cells_shared <- sum(meta_data$TCRnt %in% shared_clones & !is.na(meta_data$TCRnt))
+
+
+counts <- data.frame(
+  Category = c("Unique cluster 1", "Unique cluster 2", "Shared 1 & 2"),
+  Count = c(cells_unique_cluster1, cells_unique_cluster2, cells_shared)
+)
+print("TCR Clone Sharing Analysis (Cell Counts):")
+print(counts)
+
+### Figure 4
+## Project BL clusters onto the combined BL + FU object
+# Backup the BL object
+BL <- subset_hcv.flashseq
+
+# Load BL + FU object
+subset_hcv.flashseq <- readRDS(file = ".../hcv_flashseq_blfu.rds")
+
+# Clustering
+ElbowPlot(subset_hcv.flashseq, ndims = 50)
+subset_hcv.flashseq <- FindNeighbors(subset_hcv.flashseq, dims = 1:10)
+subset_hcv.flashseq <- RunUMAP(subset_hcv.flashseq, dims = 1:15, n.neighbors = 20, min.dist = 0.01)
+
+# Figure 4E
+DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, cols = c("grey30", "grey80"), label.box = F, pt.size = 1.3, group.by = "Timepoint", order = F)
+
+# Merge Clusters from BL with cHCV object
+meta_bl <- BL@meta.data[, "seurat_clusters", drop = FALSE]
+meta_fu <- subset_hcv.flashseq@meta.data
+
+meta_bl$cell_id <- rownames(meta_bl)
+meta_fu$cell_id <- rownames(meta_fu)
+
+merged_metadata <- dplyr::left_join(meta_fu, meta_bl, by = "cell_id")
+
+combined_values <- ifelse(
+  !is.na(merged_metadata$seurat_clusters),
+  as.character(merged_metadata$seurat_clusters),
+  as.character(merged_metadata$Timepoint)
+)
+
+final_labels <- dplyr::case_when(
+  combined_values == "1" ~ "BL_1",
+  combined_values == "2" ~ "BL_2",
+  TRUE ~ "FU" # Default case for all other values
+)
+
+# Add labels to BL + FU object
+subset_hcv.flashseq$BLclustTime <- final_labels
+
+print("Cell counts per category in the new 'BLclustTime' column:")
+table(subset_hcv.flashseq$BLclustTime)
+
+# Final plot
+DimPlot(subset_hcv.flashseq, group.by = "BLclustTime", cols = c("#00BFC4", "#F8766D", "grey70"), pt.size = 1.3)
+
+
+# Figure 3G - DEG volcano plots
+log2FC_threshold <- 0.5
+p_val_threshold <- 0.05
+variable_meta <- "BLclustTime"
+Idents(subset_hcv.flashseq) <- variable_meta
+
+# Define comparisons
+conditions <- unique(subset_hcv.flashseq@meta.data[[variable_meta]])
+print(paste("Conditions to compare:", paste(conditions, collapse = ", ")))
+combinations <- combn(conditions, 2, simplify = FALSE)
+
+# Calculate DEGs
+DEG <- list()
+for(comp in combinations) {
+  condition1 <- comp[1]
+  condition2 <- comp[2]
+  comparison_name <- paste(condition1, "vs", condition2, sep = "_")
+  
+  # Find differentially expressed genes
+  result <- FindMarkers(
+    subset_hcv.flashseq,
+    ident.1 = condition1,
+    ident.2 = condition2,
+    logfc.threshold = 0, # Keep all genes for plotting
+    min.pct = 0          # Keep all genes for plotting
+  )
+  
+  result$gene <- rownames(result)
+  DEG[[comparison_name]] <- result
+}
+
+# Define genes to plot
+deg_list <- c("MYL6", "HLA-DRA", "ISG15", "CD74", "CD38", "CXCL13", "CCR5", "GZMA", "IRF4", "ZFP36L2", "IL7R", "MAL",
+              "IGF2R", "COL6A3", "LAG3", "PTMS", "ZBTB32", "CTLA4", "SMAD3")
+
+plot_list <- list()
+for (comparison_name in names(DEG)) {
+  
+  comparison_data <- DEG[[comparison_name]]
+  
+  # Add a column for significance based on the thresholds
+  comparison_data <- comparison_data %>%
+    mutate(
+      significance = ifelse(
+        (avg_log2FC > log2FC_threshold | avg_log2FC < -log2FC_threshold) & p_val_adj < p_val_threshold, 
+        "Significant", 
+        "Not Significant"
+      )
+    )
+  
+  # Create the volcano plot
+  volcano_plot <- ggplot(comparison_data, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+    geom_point(aes(color = significance), alpha = 0.8, size = 3) +
+    # Add labels ONLY for genes in your 'deg_list' that are also significant
+    geom_text_repel(
+      data = comparison_data %>% filter(gene %in% deg_list & significance == "Significant"),
+      aes(label = gene),
+      color = "black",
+      size = 3.5,
+      fontface = "bold",
+      max.overlaps = 250,
+      box.padding = 0.7
+    ) +
+    scale_color_manual(values = c("Significant" = "red", "Not Significant" = "grey")) +
+    geom_vline(xintercept = c(-log2FC_threshold, log2FC_threshold), linetype = "dashed", color = "blue") +
+    geom_hline(yintercept = -log10(p_val_threshold), linetype = "dashed", color = "blue") +
+    labs(
+      title = comparison_name,
+      x = "Log2 Fold Change",
+      y = "-Log10 Adjusted P-value"
+    ) +
+    theme_minimal()
+  
+  plot_list[[comparison_name]] <- volcano_plot
+}
+
+# Print the first generated plot as an example
+print(plot_list[[1]])
+print(plot_list[[3]])
+
+# Figure 4H
+# Clones shared BL and FU + cluster 1 and 2 backtracing
+meta_data <- subset_hcv.flashseq@meta.data
+
+# Remove rows with missing TCR information
+meta_data <- meta_data[!is.na(meta_data$TCRnt) & meta_data$TCRnt != "", ]
+
+# Get unique clones for each condition
+bl_1_clones <- unique(meta_data$TCRnt[meta_data$BLclustTime == "BL_1"])
+bl_2_clones <- unique(meta_data$TCRnt[meta_data$BLclustTime == "BL_2"])
+fu_clones <- unique(meta_data$TCRnt[meta_data$BLclustTime == "FU"])
+
+# All BL clones combined
+all_bl_clones <- unique(c(bl_1_clones, bl_2_clones))
+
+# Categorize clones
+unique_bl <- setdiff(all_bl_clones, fu_clones)
+unique_fu <- setdiff(fu_clones, all_bl_clones)
+shared_bl_fu <- intersect(all_bl_clones, fu_clones)
+
+# For shared clones, determine their BL cluster origin
+shared_from_bl1 <- intersect(shared_bl_fu, bl_1_clones)
+shared_from_bl2 <- intersect(shared_bl_fu, bl_2_clones)
+shared_from_both <- intersect(shared_from_bl1, shared_from_bl2)
+
+# Count cells for each category
+count_cells <- function(clones, condition = NULL) {
+  if (is.null(condition)) {
+    sum(meta_data$TCRnt %in% clones)
+  } else {
+    sum(meta_data$TCRnt %in% clones & meta_data$BLclustTime == condition)
+  }
+}
+
+# Create results table
+results <- data.frame(
+  Category = c(
+    "Unique BL (total)",
+    "  - from BL_1 only",
+    "  - from BL_2 only", 
+    "  - from both BL_1 and BL_2",
+    "Unique FU",
+    "Shared BL-FU (total)",
+    "  - shared from BL_1",
+    "  - shared from BL_2",
+    "  - shared from both BL_1 and BL_2"
+  ),
+  Unique_Clones = c(
+    length(unique_bl),
+    length(setdiff(unique_bl, bl_2_clones)),
+    length(setdiff(unique_bl, bl_1_clones)),
+    length(intersect(setdiff(unique_bl, fu_clones), intersect(bl_1_clones, bl_2_clones))),
+    length(unique_fu),
+    length(shared_bl_fu),
+    length(setdiff(shared_from_bl1, shared_from_bl2)),
+    length(setdiff(shared_from_bl2, shared_from_bl1)),
+    length(shared_from_both)
+  ),
+  Total_Cells = c(
+    count_cells(unique_bl),
+    count_cells(setdiff(unique_bl, bl_2_clones)),
+    count_cells(setdiff(unique_bl, bl_1_clones)),
+    count_cells(intersect(setdiff(unique_bl, fu_clones), intersect(bl_1_clones, bl_2_clones))),
+    count_cells(unique_fu),
+    count_cells(shared_bl_fu),
+    count_cells(setdiff(shared_from_bl1, shared_from_bl2)),
+    count_cells(setdiff(shared_from_bl2, shared_from_bl1)),
+    count_cells(shared_from_both)
+  )
+)
+
+# Print the results table
+print(results)
+
+
+# Figure 4i
+metadata_hm <- subset_hcv.flashseq@meta.data
+metadata_hm <- metadata_hm[!is.na(metadata_hm$TCRnt) & metadata_hm$TCRnt != "", ]
+
+# Define cell barcodes for each category
+bl_c1_all_cells <- rownames(metadata_hm[metadata_hm$BLclustTime == "BL_1", ])
+bl_c1_shared_cells <- rownames(metadata_hm[metadata_hm$BLclustTime == "BL_1" & metadata_hm$TCRnt %in% shared_bl_fu, ])
+bl_c1_nonshared_cells <- rownames(metadata_hm[metadata_hm$BLclustTime == "BL_1" & !metadata_hm$TCRnt %in% shared_bl_fu, ])
+fu_all_cells <- rownames(metadata_hm[metadata_hm$BLclustTime == "FU", ])
+bl_c2_all_cells <- rownames(metadata_hm[metadata_hm$BLclustTime == "BL_2", ])
+
+
+# Create a list of these cell sets for the heatmap
+cell_sets <- list(
+  `BL C1 (All)` = bl_c1_all_cells,
+  `BL C1 (Shared)` = bl_c1_shared_cells,
+  `BL C1 (Non-Shared)` = bl_c1_nonshared_cells,
+  `FU (All)` = fu_all_cells,
+  `BL C2 (All)` = bl_c2_all_cells
+)
+
+# Print counts to verify each category
+cat("=== Cell Counts for Heatmap Columns ===\n")
+lapply(names(cell_sets), function(name) {
+  cat(name, ":", length(cell_sets[[name]]), "cells\n")
+})
+cat("\n")
+
+# Gene to plot
+gene_list <- c( "STAT1", "MKI67", "NKG7", "CX3CR1", "CD52", "HLA-DRA",
+                "PRDM1", "ISG15", "CD38", "IGF2R", "BCL2", "TCF7", "CCR7", "IL7R")
+
+
+# Filter the list to include only genes present in the Seurat object
+genes_for_heatmap <- gene_list[gene_list %in% rownames(subset_hcv.flashseq)]
+
+# Get expression data
+full_expression_data <- GetAssayData(subset_hcv.flashseq, assay = "RNA", slot = "data")[genes_for_heatmap, , drop = FALSE]
+avg_expression_matrix <- sapply(cell_sets, function(cells) {
+  rowMeans(full_expression_data[, cells, drop = FALSE], na.rm = TRUE)
+})
+
+# Final plot
+pheatmap(
+  avg_expression_matrix,
+  scale = "row",          # Scale genes to visualize relative expression
+  cluster_rows = F,   # Keep the original gene order
+  cluster_cols = FALSE,   # Keep the defined column order
+  color = colorRampPalette(c("dodgerblue4", "white", "red3"))(50),
+  main = "Average Gene Expression Across Cell Subsets",
+  fontsize_row = 10,
+  fontsize_col = 10
+)
