@@ -1,0 +1,368 @@
+# Figure 3 - BL subclustering
+library(ggplot2)
+library(Seurat)
+library(dplyr)
+library(patchwork)
+library(ggrepel)
+library(tibble)
+library(pheatmap)
+library(clusterProfiler)
+library(AUCell)
+library(ggpubr)
+library(tidyr)
+library(monocle3)
+library(Biobase)
+library(scMINER)
+
+
+set.seed(123)
+
+# Prepare a seurat object for nFeature bias linear regression
+prepare_noQC_object <- function(path) {
+  obj <- readRDS(file = path)
+  obj <- subset(obj, subset = nFeature_RNA > 50 & nFeature_RNA < 5000)
+  genes_to_remove <- grep("^(RPL|RPS|MT-)|(^TR[ABDG][VDJ])", rownames(obj), value = TRUE)
+  obj <- obj[!rownames(obj) %in% genes_to_remove, ]
+  obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
+  obj <- subset(obj, subset = CD14 < 0.05 & CD19 < 0.05 & MS4A7 < 0.05 & PPBP < 0.01)
+  obj$cells <- paste0(obj$Plate, obj$Well)
+  return(obj)
+}
+
+# Run AUCell GSEA with nFeature correction
+run_aucell_gsea <- function(main_seu, no_qc_seu, gmt_path) {
+  expr_main <- GetAssayData(main_seu, assay = "RNA", slot = "data")
+  expr_no_qc <- GetAssayData(no_qc_seu, assay = "RNA", slot = "data")
+  rankings_main <- AUCell_buildRankings(expr_main, plotStats = FALSE)
+  rankings_no_qc <- AUCell_buildRankings(expr_no_qc, plotStats = FALSE)
+  
+  gmt_files <- list.files(gmt_path, pattern = "\\.gmt$", full.names = TRUE)
+  
+  for (gmt_file in gmt_files) {
+    set_name <- tools::file_path_sans_ext(basename(gmt_file))
+    gene_vector <- read.gmt(gmt_file) %>% pull(gene) %>% toupper() %>% unique() %>% intersect(rownames(expr_main))
+    if (length(gene_vector) == 0) next
+    gene_set_list <- list(gene_vector); names(gene_set_list) <- set_name
+    
+    scores_main <- as.data.frame(t(getAUC(AUCell_calcAUC(gene_set_list, rankings_main)))) %>% rownames_to_column("CellID")
+    scores_no_qc <- as.data.frame(t(getAUC(AUCell_calcAUC(gene_set_list, rankings_no_qc)))) %>% rownames_to_column("CellID")
+    
+    model_data <- no_qc_seu@meta.data %>% rownames_to_column("CellID") %>% left_join(scores_no_qc, by = "CellID")
+    lm_model <- lm(model_data[[set_name]] ~ model_data$nFeature_RNA)
+    
+    adjustment_data <- main_seu@meta.data %>% rownames_to_column("CellID") %>% left_join(scores_main, by = "CellID")
+    predicted_scores <- lm_model$coefficients[1] + (adjustment_data$nFeature_RNA * lm_model$coefficients[2])
+    main_seu[[paste0("AUCell_adjusted_", set_name)]] <- adjustment_data[[set_name]] - predicted_scores
+  }
+  
+  adjusted_cols <- grep("^AUCell_adjusted_", colnames(main_seu@meta.data), value = TRUE)
+  base_names <- unique(gsub("_(UP|DN)$", "", gsub("^AUCell_adjusted_", "", adjusted_cols)))
+  
+  for (base in base_names) {
+    up_col <- paste0("AUCell_adjusted_", base, "_UP")
+    down_col <- paste0("AUCell_adjusted_", base, "_DN")
+    if (up_col %in% adjusted_cols && down_col %in% adjusted_cols) {
+      up_z <- scale(main_seu[[up_col, drop = TRUE]])
+      down_z <- scale(main_seu[[down_col, drop = TRUE]])
+      main_seu[[paste0("AUCell_composite_", base)]] <- up_z - down_z
+    }
+  }
+  return(main_seu)
+}
+
+# Read subsetted seurat object
+hcv_bl <- readRDS(file = ".../hcv_flashseq_bl.rds")
+
+# Clustering
+ElbowPlot(hcv_bl, ndims = 50)
+hcv_bl <- FindNeighbors(hcv_bl, dims = 1:10)
+hcv_bl <- FindClusters(hcv_bl, resolution = 0.6, algorithm = 4)
+hcv_bl <- RunUMAP(hcv_bl, dims = 1:10, n.neighbors = 20, min.dist = 0.01)
+
+# Figure 3A
+DimPlot(hcv_bl, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "seurat_clusters", order = F, cols = c("#00BFC4", "#F8766D"))
+
+# Remove Naive for plotting genes
+hcv_bl_filtered <- subset(hcv_bl, subset = Naive != "Naive")
+
+# Define genes to plot
+vln_genes <- c("HLA-DRA", "CD74", "CD52", "TCF7", "SELL", "CCR7")
+
+# Figure 3B
+VlnPlot(hcv_bl_filtered, features = vln_genes, ncol = 3, pt.size = 0, cols = c("1" = "#00BFC4", "2" = "#F8766D")) & NoLegend() & theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+# Calculate statistics
+stats_df_3b <- purrr::map_dfr(vln_genes, ~{
+  dat <- GetAssayData(hcv_bl_filtered, assay = "RNA", slot = "data")[.x, ]
+  res <- wilcox.test(dat[WhichCells(hcv_bl, idents = "1")] , dat[WhichCells(hcv_bl, idents = "2")])
+  tibble(Gene = .x, p_value = res$p.value)
+}) %>% mutate(p_adj_BH = p.adjust(p_value, method = "BH"))
+print("Statistics for Figure 3B Violin Plots:")
+print(stats_df_3b)
+
+## TF activities
+# Add scMINER activities as new assay
+activity_eset <- readRDS(".../activity_eset_cleaned.rds")
+auc_data <- Biobase::exprs(activity_eset)
+
+# Prune by transcription factors
+hg_driver <- getDriverList(species_type = "hg", driver_type = "TF")
+hg_driver_symbols <- hg_driver
+hg_driver_symbols_tf <- paste0(hg_driver_symbols, "_TF")
+auc_data_TF <- auc_data[rownames(auc_data) %in% hg_driver_symbols_tf, ]
+
+# Add to Seurat object
+common_cells <- intersect(colnames(hcv_bl), colnames(auc_data_TF))
+hcv_bl_activity <- subset(hcv_bl, cells = common_cells)
+hcv_bl_activity[["GENE_ACTIVITY"]] <- CreateAssayObject(counts = auc_data_TF[, common_cells])
+DefaultAssay(hcv_bl_activity) <- "GENE_ACTIVITY"
+hcv_bl_activity <- ScaleData(hcv_bl_activity, features = rownames(hcv_bl_activity))
+
+# Calculate differential activity
+hcv_bl_activity_filtered <- subset(hcv_bl_activity, subset = Naive != "Naive")
+diff_activity <- FindMarkers(hcv_bl_activity_filtered, ident.1 = "1", ident.2 = "2", logfc.threshold = 0, min.pct = 0, verbose = FALSE)
+significant_activity <- subset(diff_activity, p_val_adj < 0.05)
+
+tf_list <- c("TCF7-TF", "SMAD3-TF",
+             "STAT1-TF", "PRDM1-TF")
+
+# Figure 3C
+VlnPlot(hcv_bl_activity_filtered, 
+        features = tf_list,
+        group.by = "seurat_clusters",
+        pt.size = 0,
+        cols = c("#00BFC4", "#F8766D"),
+        ncol = 2) &
+  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+# GSEA
+hcv_bl$cells <- paste0(hcv_bl$Plate, hcv_bl$Well)
+hcv_noQC <- prepare_noQC_object(".../hcv_flashseq_CD4_A1P12removed.rds")
+hcv_bl <- run_aucell_gsea(hcv_bl, hcv_noQC, ".../Genesets/Fig 3D/") # Note: Path from user code
+
+adj_cols_3d <- grep("^AUCell_adjusted_", colnames(hcv_bl@meta.data), value = TRUE)
+comp_cols_3d <- grep("^AUCell_composite_", colnames(hcv_bl@meta.data), value = TRUE)
+base_names_3d <- unique(gsub("_(UP|DN)$", "", gsub("^AUCell_adjusted_", "", adj_cols_3d)))
+features_3d <- sapply(base_names_3d, function(base) {
+  comp_col <- paste0("AUCell_composite_", base)
+  if (comp_col %in% comp_cols_3d) return(comp_col)
+  else return(grep(paste0("^AUCell_adjusted_", base), adj_cols_3d, value = TRUE)[1])
+}, USE.NAMES = FALSE)
+
+#  Figure 3D
+VlnPlot(subset(hcv_bl, subset = Naive != "Naive"), features = features_3d, group.by = "seurat_clusters", pt.size = 0, cols = c("1" = "#00BFC4", "2" = "#F8766D"), ncol = 3) & NoLegend() & theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+stats_df_3d <- purrr::map_dfr(features_3d, ~{
+  # Get non-naive cells
+  non_naive_cells <- WhichCells(hcv_bl, expression = Naive != "Naive")
+  
+  # Extract AUCell scores for non-naive cells
+  cluster1_cells <- intersect(WhichCells(hcv_bl, idents = "1"), non_naive_cells)
+  cluster2_cells <- intersect(WhichCells(hcv_bl, idents = "2"), non_naive_cells)
+  
+  scores_c1 <- hcv_bl@meta.data[cluster1_cells, .x]
+  scores_c2 <- hcv_bl@meta.data[cluster2_cells, .x]
+  
+  # Perform Wilcoxon rank sum test
+  res <- wilcox.test(scores_c1, scores_c2)
+  
+  tibble(
+    Feature = .x,
+    p_value = res$p.value,
+    median_cluster1 = median(scores_c1, na.rm = TRUE),
+    median_cluster2 = median(scores_c2, na.rm = TRUE)
+  )
+}) %>% 
+  mutate(p_adj_BH = p.adjust(p_value, method = "BH"))
+
+print("Statistics for Figure 3D AUCell Scores:")
+print(stats_df_3d)
+
+# Figure 3E
+hcv_bl@meta.data <- hcv_bl@meta.data[, !grepl("^AUCell_", colnames(hcv_bl@meta.data))]
+hcv_bl <- run_aucell_gsea(hcv_bl, hcv_noQC, ".../Fig 3E/") # Note: Path from user code
+
+# 2. Plot specific features for Figure 3E
+p1 <- FeaturePlot(hcv_bl, features = "BCL2", pt.size = 3, order = TRUE, cols = c("grey90", "red3"), min.cutoff = "q5", max.cutoff = "q95") &
+  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) & ggtitle("BCL2")
+p2 <- FeaturePlot(hcv_bl, features = "AUCell_composite_GSE14308_TH1_VS_NAIVE_CD4_TCELL", pt.size = 3, order = TRUE, cols = c("grey90", "red3"), min.cutoff = "q5", max.cutoff = "q95") &
+  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) & ggtitle("Th1 Signature")
+print(p1 + p2)
+
+features_3e <- c("BCL2", "AUCell_composite_GSE14308_TH1_VS_NAIVE_CD4_TCELL")
+
+# 2. Calculate statistics using a Wilcoxon test for each feature
+stats_df_3e <- purrr::map_dfr(features_3e, ~{
+  non_naive_cells <- WhichCells(hcv_bl, expression = Naive != "Naive")
+  
+  # Extract AUCell scores for non-naive cells
+  cells_c1 <- intersect(WhichCells(hcv_bl, idents = "1"), non_naive_cells)
+  cells_c2 <- intersect(WhichCells(hcv_bl, idents = "2"), non_naive_cells)
+  
+  # Get data differently depending on the feature type (gene vs. metadata)
+  if (.x %in% rownames(GetAssayData(hcv_bl, assay = "RNA"))) {
+    # For a gene like BCL2, get data from the RNA assay
+    feature_data <- GetAssayData(hcv_bl, assay = "RNA", slot = "data")[.x, ]
+  } else {
+    # For AUCell scores, get data from the object's metadata
+    feature_data <- hcv_bl@meta.data[[.x]]
+    names(feature_data) <- rownames(hcv_bl@meta.data) # Ensure cells are named
+  }
+  
+  # Run the Wilcoxon test
+  res <- wilcox.test(feature_data[cells_c1], feature_data[cells_c2])
+  
+  # Return a structured table (tibble) with the results
+  tibble(
+    Feature = .x,
+    p_value = res$p.value
+  )
+}) %>% 
+  # 3. Adjust p-values for multiple comparisons
+  mutate(p_adj_BH = p.adjust(p_value, method = "BH"))
+
+# 4. Print the final statistics table
+print("Statistics for Figure 3E Feature Plots:")
+print(stats_df_3e)
+
+
+# Figure 3I - Monocle 3 trajectory analysis
+# Convert to CDS
+cds <- as.cell_data_set(hcv_bl, group.by = "seurat_clusters")
+
+# Cluster cells
+cds <- cluster_cells(cds, reduction_method = "UMAP")
+
+# Learn the trajectory graph on the UMAP reduction
+cds <- learn_graph(cds, use_partition = FALSE, learn_graph_control = list(minimal_branch_len = 25, ncenter = 200))
+
+# Identify the trajectory root
+pr_graph_coords <- cds@principal_graph_aux$UMAP$pr_graph_proj
+cells_in_cluster1 <- which(colData(cds)$seurat_clusters == "1")
+closest_vertex_in_cluster1 <- cds@principal_graph_aux$UMAP$pr_graph_cell_proj_closest_vertex[cells_in_cluster1, ]
+most_frequent_vertex_index <- as.numeric(names(sort(table(closest_vertex_in_cluster1), decreasing = TRUE))[1])
+root_pr_nodes <- rownames(pr_graph_coords)[most_frequent_vertex_index]
+
+# Prder cells along the learned trajectory
+cds <- order_cells(cds, root_pr_nodes = root_pr_nodes)
+
+# Final plot
+plot_cells(cds, trajectory_graph_color = "black", trajectory_graph_segment_size = 1.5,
+           color_cells_by = "pseudotime",
+           label_cell_groups = FALSE,
+           label_leaves = FALSE,
+           label_branch_points = FALSE,
+           graph_label_size = 1.5,
+           cell_size = 1.3,
+           show_trajectory_graph = TRUE) +
+  ggtitle("Pseudotime along Trajectory")
+
+
+# Figure 3J
+meta_data <- hcv_bl@meta.data
+
+cluster1_tcr <- meta_data$TCRnt[meta_data$seurat_clusters == 1]
+cluster2_tcr <- meta_data$TCRnt[meta_data$seurat_clusters == 2]
+
+cluster1_tcr <- cluster1_tcr[!is.na(cluster1_tcr)]
+cluster2_tcr <- cluster2_tcr[!is.na(cluster2_tcr)]
+
+unique_cluster1_tcr <- unique(cluster1_tcr)
+unique_cluster2_tcr <- unique(cluster2_tcr)
+
+shared_clones <- intersect(unique_cluster1_tcr, unique_cluster2_tcr)
+unique_to_cluster1 <- setdiff(unique_cluster1_tcr, unique_cluster2_tcr)
+unique_to_cluster2 <- setdiff(unique_cluster2_tcr, unique_cluster1_tcr)
+
+cells_unique_cluster1 <- sum(meta_data$seurat_clusters == 1 & 
+                               meta_data$TCRnt %in% unique_to_cluster1 & 
+                               !is.na(meta_data$TCRnt))
+
+cells_unique_cluster2 <- sum(meta_data$seurat_clusters == 2 & 
+                               meta_data$TCRnt %in% unique_to_cluster2 & 
+                               !is.na(meta_data$TCRnt))
+
+cells_shared <- sum(meta_data$TCRnt %in% shared_clones & !is.na(meta_data$TCRnt))
+
+counts <- data.frame(
+  Category = c("Unique cluster 1", "Unique cluster 2", "Shared 1 & 2"),
+  Count = c(cells_unique_cluster1, cells_unique_cluster2, cells_shared)
+)
+
+print("TCR Clone Sharing Analysis (Cell Counts):")
+print(counts)
+
+ggplot(counts, aes(x = Category, y = Count, fill = Category)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  geom_text(aes(label = Count), vjust = -0.3, size = 4) +
+  scale_fill_manual(values = c("Unique cluster 1" = "#E31A1C", 
+                               "Unique cluster 2" = "#1F78B4", 
+                               "Shared 1 & 2" = "#33A02C")) +
+  labs(title = "TCR Clone Sharing Between Clusters 1 and 2 (Cell Counts)",
+       x = "Category",
+       y = "Cell Count") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Figure 3K
+hcv_bl$clone_category <- "Other" # Initialize column
+
+# Get cell barcodes for each category
+cells_c1_shared <- WhichCells(hcv_bl, expression = seurat_clusters == 1 & TCRnt %in% shared_clones)
+cells_c2_shared <- WhichCells(hcv_bl, expression = seurat_clusters == 2 & TCRnt %in% shared_clones)
+cells_c1_unique <- WhichCells(hcv_bl, expression = seurat_clusters == 1 & TCRnt %in% unique_to_cluster1)
+cells_c2_unique <- WhichCells(hcv_bl, expression = seurat_clusters == 2 & TCRnt %in% unique_to_cluster2)
+
+# Assign labels to the new metadata column
+hcv_bl@meta.data[cells_c1_shared, "clone_category"] <- "Shared_Cluster1"
+hcv_bl@meta.data[cells_c2_shared, "clone_category"] <- "Shared_Cluster2"
+hcv_bl@meta.data[cells_c1_unique, "clone_category"] <- "Unique_Cluster1"
+hcv_bl@meta.data[cells_c2_unique, "clone_category"] <- "Unique_Cluster2"
+
+# Define the genes for the heatmap
+genes_for_heatmap <- c( "HLA-DRA", "CD69", "CD52", "CD38", "CCR5", "IL32", "NR4A3", "MKI67",  "GZMA",  "CXCL13",
+                        "PTPN13", "KLF6",  "BCL2", "TCF7", "IL7R", "SELL")
+
+cells_c1_all <- WhichCells(hcv_bl, expression = seurat_clusters == 1)
+cells_c1_shared <- WhichCells(hcv_bl, expression = seurat_clusters == 1 & TCRnt %in% shared_clones)
+cells_c1_unique <- WhichCells(hcv_bl, expression = seurat_clusters == 1 & TCRnt %in% unique_to_cluster1)
+
+cells_c2_all <- WhichCells(hcv_bl, expression = seurat_clusters == 2)
+cells_c2_shared <- WhichCells(hcv_bl, expression = seurat_clusters == 2 & TCRnt %in% shared_clones)
+cells_c2_unique <- WhichCells(hcv_bl, expression = seurat_clusters == 2 & TCRnt %in% unique_to_cluster2)
+
+cell_sets <- list(
+  "Cluster 1 all" = cells_c1_all,
+  "Cluster 1 shared" = cells_c1_shared,
+  "Cluster 1 non-shared" = cells_c1_unique,
+  "Cluster 2 all" = cells_c2_all,
+  "Cluster 2 shared" = cells_c2_shared,
+  "Cluster 2 non-shared" = cells_c2_unique
+)
+
+## Calculate Average Expression
+# Get the full expression data for the genes of interest
+full_expression_data <- GetAssayData(hcv_bl, assay = "RNA", slot = "data")[genes_for_heatmap, , drop = FALSE]
+
+# Calculate the average gene expression for each
+avg_expression_matrix <- sapply(cell_sets, function(cells) {
+  if (length(cells) == 0) {
+    return(rep(0, nrow(full_expression_data)))
+  }
+  rowMeans(full_expression_data[, cells, drop = FALSE], na.rm = TRUE)
+})
+
+# Plot the matrix and scale each gene across all columns
+pheatmap(
+  avg_expression_matrix,
+  scale = "row", # This argument ensures scaling is applied across all 6 columns at once.
+  cluster_rows = F,
+  cluster_cols = FALSE,
+  gaps_col = 3, # Adds a visual gap between Cluster 1 and Cluster 2 categories.
+  color = colorRampPalette(c("dodgerblue4", "white", "red3"))(50),
+  main = "Average Gene Expression Across Categories (Unified Scaling)",
+  fontsize_row = 8,
+  fontsize_col = 10
+)
