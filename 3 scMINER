@@ -8,7 +8,7 @@ set.seed(123)
 
 # Load the full seurat object
 seurat_obj <- readRDS(file =
-                        ".../hcv_flashseq_bl.rds")
+                        ".../hcv_flashseq_all.rds")
 
 # Define a project directory where input will be created
 project_dir <- "scminer_analysis"
