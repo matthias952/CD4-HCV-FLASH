@@ -89,7 +89,7 @@ da_results <- getDA(
 da_results$feature_basename <- gsub("_TF$", "", da_results$feature)
 da_results_filtered <- da_results %>% 
   filter(g1_pct > 0, g0_pct > 0) %>%
-  mutate(significance = ifelse((abs(log2FC) > 0.25) & (Pval < 0.05), "Significant", "Not Significant"))
+  mutate(significance = ifelse((abs(log2FC) > 0.25) & (FDR < 0.05), "Significant", "Not Significant"))
 
 # Get TF driver list and filter for TFs
 hg_driver_symbols <- getDriverList(species_type = "hg", driver_type = "TF")
@@ -103,7 +103,7 @@ genes_to_label <- genes_to_label %>% filter(feature_basename %in% c("TOX", "TOX2
                                                                     "FOXO3", "STAT1", "STAT6", "STAT5A", "STAT5B", "ID3", "TCF7", "NR4A3",
                                                                     "KDM1A", "IRF7", "CREM", "NFATC2", "JUNB", "CTCF", "NR4A2"))
 
-volcano_plot <- ggplot(da_results_TF, aes(x = log2FC, y = -log10(Pval), color = significance)) +
+volcano_plot <- ggplot(da_results_TF, aes(x = log2FC, y = -log10(FDR), color = significance)) +
   geom_point(alpha = 0.7, size = 2.5) +
   geom_text_repel(data = genes_to_label, aes(label = feature_basename), 
                   size = 3.5, color = "black", max.overlaps = 5000, box.padding = 0.5) +
