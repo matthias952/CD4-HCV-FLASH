@@ -43,7 +43,7 @@ counts <- data.frame(
   Category = c("Unique cluster 1", "Unique cluster 2", "Shared 1 & 2"),
   Count = c(cells_unique_cluster1, cells_unique_cluster2, cells_shared)
 )
-print("TCR Clone Sharing Analysis (Cell Counts):")
+print("TCR Clones - Cell Counts:")
 print(counts)
 
 ### Figure 4
