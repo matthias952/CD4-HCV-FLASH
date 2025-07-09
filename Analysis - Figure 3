@@ -1,4 +1,5 @@
-# Figure 3 - BL subclustering
+### Figure 3
+
 library(ggplot2)
 library(Seurat)
 library(dplyr)
