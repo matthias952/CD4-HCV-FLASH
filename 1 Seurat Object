@@ -8,13 +8,13 @@ output_path <-
 
 # Import expression and meta data
 expression_data <- read.csv(
-  file.path(input_dir, "CD4_filtered_expression_data.csv"),
+  file.path(input_dir, "CD4_expression_data.csv"),
   row.names = 1,
   check.names = FALSE
 )
 
 metadata <- read.csv(
-  file.path(input_dir, "CD4_filtered_metadata.csv"),
+  file.path(input_dir, "CD4_metadata.csv"),
   check.names = FALSE
 )
 
