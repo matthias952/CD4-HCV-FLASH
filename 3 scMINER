@@ -17,7 +17,7 @@ dir.create(project_dir, showWarnings = FALSE)
 # Define the project space
 space <- createProjectSpace(
   project_dir = project_dir,
-  project_name = "20250524_PHH_MAR3",
+  project_name = "...",
   do.unlink = FALSE
 )
 print(space)
