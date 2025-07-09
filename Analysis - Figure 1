@@ -49,7 +49,7 @@ expr_all <- GetAssayData(hcv_all, assay = "RNA", slot = "data")
 expr_noQC <- GetAssayData(hcv_noQC, assay = "RNA", slot = "data")
 
 # Get GMT files
-gmt_files <- list.files("/Fig1/", # path to gmt files
+gmt_files <- list.files("gmt_files/Fig1/", # path to gmt files
   pattern = "\\.gmt$",
   full.names = TRUE
 )
