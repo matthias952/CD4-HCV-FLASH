@@ -112,7 +112,7 @@ volcano_plot <- ggplot(da_results_TF, aes(x = log2FC, y = -log10(FDR), color = s
   geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey50") +
   labs(title = "Differential TF Activity: SPR vs FU",
        x = "← Increased in FU | log2(Fold Change) | Increased in SPR →",
-       y = "-log10(P-value)") +
+       y = "-log10(FDR)") +
   theme_minimal() +
   theme(legend.position = "top", plot.title = element_text(hjust = 0.5, face = "bold"))
 
@@ -144,22 +144,22 @@ interaction_colors <- c(
 csv_file_path <- ".../TOX_interactions.csv"
 tox_interactions <- read.csv(csv_file_path)
 
-# Convert back to the original list format for compatibility with existing code
+# Convert for compatibility
 all_connections <- list()
 for (condition in unique(tox_interactions$condition)) {
   all_connections[[condition]] <- tox_interactions %>% 
     filter(condition == !!condition) %>%
-    select(-condition)  # Remove the condition column to match original format
+    select(-condition)
 }
 
-# --- 3. Prepare Data for Plotting (Automated Counts) ---
+# Prepare Data 
 # Identify targets unique to each condition
 fu_targets <- all_connections[["FU"]]$to
 spr_targets <- all_connections[["SPR"]]$to
 fu_only_targets <- setdiff(fu_targets, spr_targets)
 spr_only_targets <- setdiff(spr_targets, fu_targets)
 
-# Dynamically count positive/negative interactions for UNIQUE targets
+# Count positive/negative interactions
 counts <- list(
   FU = list(
     Positive = all_connections$FU %>% filter(to %in% fu_only_targets, interaction_type == "Positive") %>% nrow(),
@@ -171,19 +171,19 @@ counts <- list(
   )
 )
 
-# --- 4. Plotting Function for Network Visualization ---
+# Plotting function
 generate_side_plot <- function(condition_name, origin_y_position = 0.5) {
-  # A. Set up layout
+  # Set up layout
   is_left_side <- condition_name == "FU"
   bar_x <- if (is_left_side) -8 else 8
   origin_x <- 0
   label_x_offset <- if (is_left_side) -2.5 else 2.5
   
-  # B. Select data for the chosen condition
+  # Select data for chosen condition
   condition_counts <- counts[[condition_name]]
   total_genes <- sum(unlist(condition_counts))
   
-  # C. Create data for the stacked bars
+  # Create data for stacked bars
   rect_data <- tibble(
     type = c("Positive", "Negative"),
     count = c(condition_counts$Positive, condition_counts$Negative),
@@ -196,7 +196,7 @@ generate_side_plot <- function(condition_name, origin_y_position = 0.5) {
       xmax = bar_x + 0.5
     )
   
-  # D. Create data for connecting lines from origin to the bars
+  # Create data for connecting lines from origin
   origin_y_abs <- total_genes * origin_y_position
   
   positive_targets <- tibble(
@@ -216,7 +216,7 @@ generate_side_plot <- function(condition_name, origin_y_position = 0.5) {
       linetype = if_else(type == "Positive", "solid", "dashed")
     )
   
-  # E. Assemble the ggplot
+  # Assemble
   p <- ggplot() +
     geom_segment(data = segment_data, aes(x = x, y = y, xend = xend, yend = yend, linetype = linetype), color = "black", alpha = 0.7) +
     geom_rect(data = rect_data, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = color), color = "black") +
@@ -234,12 +234,9 @@ generate_side_plot <- function(condition_name, origin_y_position = 0.5) {
   return(p)
 }
 
-# --- 5. Generate and Display the Final Plots ---
-# The origin_y_position can be adjusted (0.5 = center, 0 = bottom, 1 = top)
+# Final plot
 plot_fu <- generate_side_plot("FU", origin_y_position = 0.5)
 plot_spr <- generate_side_plot("SPR", origin_y_position = 0.5)
-
-# Print plots to the viewer (can be saved from there)
 print(plot_fu)
 print(plot_spr)
 
