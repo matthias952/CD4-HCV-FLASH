@@ -100,28 +100,42 @@ stats_df_3b <- purrr::map_dfr(vln_genes, ~{
 print("Statistics for Figure 3B Violin Plots:")
 print(stats_df_3b)
 
-## TF activities
-# Add scMINER activities as new assay
-activity_eset <- readRDS(".../activity_eset_cleaned.rds")
-auc_data <- Biobase::exprs(activity_eset)
+# Figure 3C
+# Add scMINER activities
+activity_eset <- readRDS(".../activity_eset.rds")
 
-# Prune by transcription factors
-hg_driver <- getDriverList(species_type = "hg", driver_type = "TF")
-hg_driver_symbols <- hg_driver
-hg_driver_symbols_tf <- paste0(hg_driver_symbols, "_TF")
-auc_data_TF <- auc_data[rownames(auc_data) %in% hg_driver_symbols_tf, ]
+# Prune activity Eset by common cells and add Seurat cluster annotation
+common_cells <- intersect(colnames(hcv_bl), colnames(activity_eset))
+activity_eset_common <- activity_eset[, common_cells]
+cluster_info <- hcv_bl$seurat_clusters
+Biobase::pData(activity_eset_common)$seurat_clusters <- cluster_info[colnames(activity_eset_common)]
+cells_cluster_1_2 <- which(Biobase::pData(activity_eset_common)$seurat_clusters %in% c("1", "2"))
+activity_eset_filtered <- activity_eset_common[, cells_cluster_1_2]
 
-# Add to Seurat object
-common_cells <- intersect(colnames(hcv_bl), colnames(auc_data_TF))
+# Perform differential activity analysis on C1 vs C2 in BL-filtered activity Eset
+da_results <- getDA(
+  input_eset = activity_eset_filtered,
+  group_by = "seurat_clusters",
+  g1 = "1",
+  g0 = "2",
+  use_method = "t.test"
+)
+da_results$feature_basename <- gsub("_TF$", "", da_results$feature)
+
+# Filter differential activity results and add significance
+da_results_filtered <- da_results %>% 
+  filter(g1_pct > 0, g0_pct > 0) %>%
+  mutate(significance = ifelse((FDR < 0.05), "Significant", "Not Significant"))
+
+# Get TF driver list and filter for DA results for TFs
+hg_driver_symbols <- getDriverList(species_type = "hg", driver_type = "TF")
+da_results_TF <- da_results_filtered[da_results_filtered$feature_basename %in% hg_driver_symbols, ]
+
+# Add activity as new assay in Seurat object
+auc_data <- Biobase::exprs(activity_eset_filtered)
 hcv_bl_activity <- subset(hcv_bl, cells = common_cells)
-hcv_bl_activity[["GENE_ACTIVITY"]] <- CreateAssayObject(counts = auc_data_TF[, common_cells])
+hcv_bl_activity[["GENE_ACTIVITY"]] <- CreateAssayObject(counts = auc_data[, common_cells])
 DefaultAssay(hcv_bl_activity) <- "GENE_ACTIVITY"
-hcv_bl_activity <- ScaleData(hcv_bl_activity, features = rownames(hcv_bl_activity))
-
-# Calculate differential activity
-hcv_bl_activity_filtered <- subset(hcv_bl_activity, subset = Naive != "Naive")
-diff_activity <- FindMarkers(hcv_bl_activity_filtered, ident.1 = "1", ident.2 = "2", logfc.threshold = 0, min.pct = 0, verbose = FALSE)
-significant_activity <- subset(diff_activity, p_val_adj < 0.05)
 
 tf_list <- c("TCF7-TF", "SMAD3-TF",
              "STAT1-TF", "PRDM1-TF")
@@ -134,6 +148,9 @@ VlnPlot(hcv_bl_activity_filtered,
         cols = c("#00BFC4", "#F8766D"),
         ncol = 2) &
   NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+statistics <- filter(da_results_TF, feature_basename %in% c("TCF7", "SMAD3", "STAT1", "PRDM1"))
+print(statistics)
 
 # GSEA
 hcv_bl$cells <- paste0(hcv_bl$Plate, hcv_bl$Well)
