@@ -12,7 +12,7 @@ library(Biobase)
 timepoint_col <- c("FU" = "#FFC2C2", "SPR" = "#B2DFEE")
 
 # Load activity matrix
-activity_eset <- readRDS(".../activity_eset_cleaned.rds")
+activity_eset <- readRDS(".../activity_eset.rds")
 activity_matrix <- exprs(activity_eset)
 
 # Load original Seurat object
