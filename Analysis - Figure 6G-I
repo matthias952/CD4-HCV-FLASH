@@ -95,6 +95,10 @@ da_results_filtered <- da_results %>%
 hg_driver_symbols <- getDriverList(species_type = "hg", driver_type = "TF")
 da_results_TF <- da_results_filtered[da_results_filtered$feature_basename %in% hg_driver_symbols, ]
 
+# Set all 0 values to the mininimum value found in the data results
+min_nonzero_fdr <- min(da_results_TF$FDR[da_results_TF$FDR > 0], na.rm = TRUE)
+da_results_TF$FDR[da_results_TF$FDR == 0] <- min_nonzero_fdr
+
 # Create volcano plot with all genes
 genes_to_label <- da_results_TF %>% filter(significance == "Significant")
 genes_to_label <- genes_to_label %>% filter(feature_basename %in% c("TOX", "TOX2", "STAT4", "BATF", "NFAT5", "EBF1", "ZEB1", "IKZF4", "KDM5A",
