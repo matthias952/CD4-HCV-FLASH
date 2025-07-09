@@ -1,4 +1,4 @@
-# Figure 6A to 6E
+### Figure 6A to 6E
 
 library(Seurat)
 library(dplyr)
