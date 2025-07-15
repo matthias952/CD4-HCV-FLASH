@@ -24,8 +24,7 @@ prepare_noQC_object <- function(path) {
   obj <- obj[!rownames(obj) %in% genes_to_remove, ]
   
   obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
-  obj <- subset(obj, subset = CD14 < 0.001 & CD19 < 0.001 & MS4A7 < 0.001 & PPBP < 0.001)
-  
+
   obj$cells <- paste0(obj$Plate, obj$Well)
   obj$Timepoint <- factor(obj$Timepoint, levels = c("BL", "FU", "SPR", "acute"))
   obj@meta.data[["Timepoint"]] <- droplevels(obj@meta.data[["Timepoint"]])
@@ -190,3 +189,21 @@ final_stats_df <- final_stats_df[, c("Feature", "Cluster1", "Cluster2", "Median_
 # Print final results table
 print(final_stats_df)
 
+
+## Figure 1E
+# Scale scores for inter gene set comparability
+for (col in final_features) {
+  scaled_col_name <- gsub("AUCell_composite_", "AUCell_scaledcompo_", col)
+  plot_object@meta.data[[scaled_col_name]] <- scale(plot_object@meta.data[[col]])[,1]
+}
+# Update composite_columns to use scaled scores
+scaled_composite_columns <- gsub("AUCell_composite_", "AUCell_scaledcompo_", final_features)
+
+df <- plot_object@meta.data[, c(scaled_composite_columns, "Timepoint"), drop = FALSE]
+
+median_data <- df %>%
+  group_by(.data[["Timepoint"]]) %>%
+  summarise(across(all_of(scaled_composite_columns), median, na.rm = TRUE))
+
+# View the summarized data
+print(median_data)
