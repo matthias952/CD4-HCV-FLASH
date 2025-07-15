@@ -87,19 +87,17 @@ subset_hcv.flashseq <- FindClusters(subset_hcv.flashseq, resolution = 0.8, algor
 subset_hcv.flashseq <- RunUMAP(subset_hcv.flashseq, dims = 1:20, n.neighbors = 20, min.dist = 0.0001)
 
 # Figure 2A
-clust.col = c("#A0A0A0", "#65C765", "#C1E9C1", "#464646", "#E1E1E1", "#359335")
-DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, cols = clust.col, pt.size = 1.3, group.by = "seurat_clusters", order = F)
+clust.col = c("#C1E9C1", "#65C765", "#A0A0A0", "#359335", "#464646")
+DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, cols = clust.col, pt.size = 1.3, group.by = "seurat_clusters", order = F) & NoLegend()
 
 # Figure 2B
-gene_list <- c("ZEB2", "DUSP4", "CD74", "PRDM1", "STAT1", "CD38", "HLA-DRA", "PDCD1", "CCL5","NKG7",
-               "IL32", "ISG15", "KLRB1", "CCR5", "GZMA", "CX3CR1", "MKI67", 
-               "MAF", "AMFR", "CD52",  "EBF1",
-               "CXCL13", "CTLA4", "GNG4", "LAG3", "PTPN13", "TOX", "TOX2",
-               "IGF2R", "CXCR4", "ZFP36", "KLF6", "TNFAIP3","CREM", "NR4A3", "FOSL2", "PTGER4", "CD69", "JUNB", "JUN",
-               "BCL2", "TCF7", "FOXO1", "IL7R", "SELL", "FOS", "CCR7", "LEF1", "MYC", "PTGER2")
+gene_list <- c("ZFP36", "FOSL2", "TBX21", "PTGER4", "DUSP2", "DUSP4", "ASCL2", "STAT1", "PRDM1", "CD74", "IL32", "KLRB1",  "CCL5",
+               "TOX", "CD38", "ISG15", "HLA-DRA", "TOX2", "CD52", "MAF", "CCR5", "NKG7", "CX3CR1", "GZMA", "MKI67", "CDC20", "CXCL13",
+               "ZEB2", "PDCD1", "GNG4", "LAG3", "CTLA4", "PTPN13", "IGF2R", "BCL2", "TCF7", "IL7R", "LEF1", "CCR7",  "CXCR4", "PTGER2",  
+               "FOXO1", "MYC",  "FOSB", "FOS", "SELL",  "JUN", "KLF6",  "CD69", "TNFAIP3", "CREM", "NR4A3", "YPEL5")
 
 # Re-order seurat clusters
-subset_hcv.flashseq@meta.data$seurat_clusters <- factor(subset_hcv.flashseq@meta.data$seurat_clusters, levels = c("4", "1", "5", "3", "6", "2"))
+subset_hcv.flashseq@meta.data$seurat_clusters <- factor(subset_hcv.flashseq@meta.data$seurat_clusters, levels = c("2", "4", "1", "5", "3"))
 
 # Create expression data frame
 variable_meta <- "seurat_clusters"
@@ -115,7 +113,7 @@ heatmap_data <- as.data.frame(t(as.matrix(expression_data))) %>%
 cluster_order <- levels(subset_hcv.flashseq$seurat_clusters)
 heatmap_data <- heatmap_data[, cluster_order, drop = FALSE]
 pheatmap(heatmap_data, cluster_rows = F,
-         cluster_cols = F, color = colorRampPalette(c("white", "grey80", "red"))(50),
+         cluster_cols = F, color = colorRampPalette(c("white", "pink", "red", "red4"))(50),
          scale = "row", 
          main = "Average Gene Expression by Seurat Cluster", fontsize_row = 10, fontsize_col = 10)
 
@@ -123,20 +121,6 @@ pheatmap(heatmap_data, cluster_rows = F,
 subset_hcv.flashseq$cells <- paste0(subset_hcv.flashseq$Plate, subset_hcv.flashseq$Well)
 hcv_noQC <- prepare_noQC_object(".../hcv_flashseq_cd4_A1P12.rds")
 subset_hcv.flashseq <- run_aucell_gsea(subset_hcv.flashseq, hcv_noQC, ".../Genesets/Fig 2C/")
-composite_cols_2c <- grep("^AUCell_composite_", colnames(subset_hcv.flashseq@meta.data), value = TRUE)
-FeaturePlot(subset_hcv.flashseq, features = composite_cols_2c, pt.size = 1.3, ncol = 1, order = TRUE, cols = c("grey90", "red3"), min.cutoff = "q5", max.cutoff = "q95")
-
-
-# Figure 2D
-FeaturePlot(subset_hcv.flashseq, features = c("BCL2", "CCR7", "ISG15", "CD52"),
-            min.cutoff = "q5", max.cutoff = "q95",
-            cols = c("grey90","red3"), pt.size = 1.3, ncol = 2, order = T) &
-            NoLegend() &
-            theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
-
-# Figure 2E
-subset_hcv.flashseq@meta.data <- subset_hcv.flashseq@meta.data[, !grepl("^AUCell_", colnames(subset_hcv.flashseq@meta.data))]
-subset_hcv.flashseq <- run_aucell_gsea(subset_hcv.flashseq, hcv_noQC, ".../Genesets/Fig 2E/")
 
 # Extract AUCell scores
 all_adj_cols <- grep("^AUCell_adjusted_", colnames(subset_hcv.flashseq@meta.data), value = TRUE)
@@ -183,17 +167,38 @@ plot_data$Cluster <- factor(plot_data$Cluster, levels = levels(subset_hcv.flashs
 # Dot plot
 ggplot(plot_data, aes(x = Cluster, y = Signature_Clean)) +
   geom_point(aes(color = Mean_AUCell_Score_Scaled, size = neg_log10_p_adj)) +
-  scale_color_gradient2(low = "grey80", mid = "grey50", high = "red3", midpoint = 0, name = "Scaled Score\n(Z-score)") +
+  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4")) +
   scale_size_continuous(name = "-log10(adj. p-value)", range = c(2, 8)) +
   labs(title = "Clustered Signature Enrichment by Cluster", x = "Seurat Cluster", y = "Gene Signature") +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10), axis.text.y = element_text(size = 9))
+
+
+# Figure 2D left
+subset_hcv.flashseq@meta.data <- subset_hcv.flashseq@meta.data[, !grepl("^AUCell_", colnames(subset_hcv.flashseq@meta.data))]
+subset_hcv.flashseq <- run_aucell_gsea(subset_hcv.flashseq, hcv_noQC, ".../Genesets/Fig 2D/")
+composite_cols_2c <- grep("^AUCell_composite_", colnames(subset_hcv.flashseq@meta.data), value = TRUE)
+FeaturePlot(subset_hcv.flashseq, features = composite_cols_2c, pt.size = 1.3, ncol = 1, order = TRUE, min.cutoff = "q5", max.cutoff = "q95") & 
+  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4"))
+
+# Figure 2D right
+FeaturePlot(subset_hcv.flashseq,
+            features = c("BCL2", "CCR7", "ISG15", "KLRB1"),
+            min.cutoff = "q5",
+            max.cutoff = "q95",
+            pt.size = 1.3,
+            ncol = 2,
+            order = T) &
+              NoLegend() &
+              scale_color_gradientn(colors = c("grey90", "pink", "red", "red4")) &
+              theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
 
 # Figure 2F
 timepoint_col = c("#0000E2", "#B40000", "#FFC2C2", "#B2DFEE")
 DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, cols = timepoint_col, pt.size = 1.3, group.by = "Timepoint", order = F)
 
 # Figure 2G
+subset_hcv.flashseq@meta.data$seurat_clusters <- factor(subset_hcv.flashseq@meta.data$seurat_clusters, levels = c("2", "4", "1", "5", "3"))
 proportions_df <- subset_hcv.flashseq@meta.data %>%
   count(Timepoint, seurat_clusters) %>%
   group_by(Timepoint) %>%
@@ -204,8 +209,11 @@ ggplot(proportions_df, aes(x = Timepoint, y = Proportion, fill = seurat_clusters
   scale_fill_manual(values = clust.col) +
   labs(title = "Proportion of Seurat Clusters per Timepoint", y = "Proportion (%)") +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  scale_fill_manual(values = c("#464646", "#A0A0A0", "#E1E1E1", "#C1E9C1", "#359335", "#65C765"))
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank()   # Remove minor grid lines
+  ) +  scale_fill_manual(values = c("#65C765", "#359335", "#C1E9C1", "#464646", "#A0A0A0"))
 
 # Supplementary figure 3 A - patient UMAP
 DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "Patient", order = F)
@@ -224,30 +232,21 @@ p_val_threshold <- 0.05
 
 # Define genes to label
 cluster_specific_labels <- list(
-"1" = c("CD52", "B2M", "MKI67", "CD3D", "S100A6", "PFN1", "ISG15", "IFITM1", "MAL", "NLRP1", "ZFP36L2", "CD37", "DUSP1", "CCR7", "SOCS3", "TGFB1", "CD5"),
-"2" = c("FOS", "FOSB", "CCR7", "MAL", "IL7R", "PTGER2", "MYC", "SOCS3", "LEF1", "NELL2", "BCL2", "FOXO1", "CD52",
-              "DUSP4", "HLA-DRA", "CXCL13", "TOX2", "TOX", "ZEB2", "PDCD1", "ISG15", "IKZF1"),
-"3" = c("CD52", "PTPN13", "IL32", "NELL2", "LAG3", "BCL2", "TNFSF8", "STAT3", "GNG4", "HLA-DRA", "NR4A2", "GZMA",
-              "ISG15", "CD74", "JUN"),
-"4" = c("CD74", "HLA-DRA", "IL32", "KLRB1", "ISG15", "ZEB2", "CD38", "TBX21", "IRF7", "TNFRSF1B",
-              "STAT1", "SELL", "CCR7", "CXCR4", "BCL2", "NELL2", "IGF2R"),
-"5" = c("TMTC4", "RN7SL1", "CD52", "PDCD4", "SOX11", "DUSP1", "CD2", "FOS", "CCR7"),
-"6" = c("MIR23AHG", "JUDN", "TNFAIP3", "NR4A2", "KLF6", "CXCR4", "NR4A3", "IFITM3", "KLF3", "HLA-DRA", "PRDM1", "STAT1", "FOXP1")
-)
+  "1" = c("PTPN13", "KDM5D", "ITGA4", "BCL2", "CD52", "KLRB1", "HLA-DRA", "ISG15", "CD74", "IL32", "IFIM1", "ICOS", "BCL2"),
+  "2" = c("TPT1", "YPEL5", "IGF2R", "COX7C", "JUND", "DUSP8", "CXCR4", "ANXA1", "PRDM1", "DUSP5", "SELPLG", "SUN2", "NEAT1", "DUSP2", "SOCS3", "BTF3"),
+  "3" = c("TBX21", "CD74", "IL32", "HLA-DRA", "ISG15", "CXCR3", "IRF7", "ASCL2", "IL2RG", "IGF2R", "IL7R", "CXCR4", "CCR7", "SELL", "BCL2", "NELL2"),
+  "4" = c("FOS", "FOSB", "CCR7", "MAL", "SOCS2", "LEF1", "CD52", "DUSP4", "ENTPD1", "CXCL13", "PDCD1", "CD74", "ISG15", "MAF", "WNT7A", "SELL", "JUNB"),
+  "5" = c("BCL2", "JUN", "MAL", "TCF7", "FOXP1", "LEF1", "STAT3", "IL7R", "DUSP1", "JUND", "CDC20", "MKI67", "CD52", "HLA-DRA", "B2M", "ITM2A", "PFN1"))
 
 plot_list <- list()
 for (cluster_name in unique(all_deg_results$cluster)) {
-  
   comparison_data <- all_deg_results %>%
     filter(cluster == cluster_name)
-  
   comparison_data <- comparison_data %>%
     mutate(
       significance = ifelse((avg_log2FC > log2FC_threshold | avg_log2FC < -log2FC_threshold) & p_val_adj < p_val_threshold, "Significant", "Not Significant")
     )
-  
   current_label_list <- cluster_specific_labels[[as.character(cluster_name)]]
-  
   genes_to_label <- comparison_data %>%
     filter(
       gene %in% current_label_list & 
