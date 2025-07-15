@@ -14,8 +14,8 @@ subset_hcv.flashseq <- readRDS(file = ".../hcv_flashseq_bl.rds")
 
 # Clustering
 subset_hcv.flashseq <- FindNeighbors(subset_hcv.flashseq, dims = 1:10)
-subset_hcv.flashseq <- FindClusters(subset_hcv.flashseq, resolution = 0.6, algorithm = 4)
-subset_hcv.flashseq <- RunUMAP(subset_hcv.flashseq, dims = 1:10, n.neighbors = 20, min.dist = 0.01)
+subset_hcv.flashseq <- FindClusters(subset_hcv.flashseq, resolution = 0.8, algorithm = 4)
+subset_hcv.flashseq <- RunUMAP(subset_hcv.flashseq, dims = 1:10, n.neighbors = 40, min.dist = 0.01)
 DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "seurat_clusters", order = F)
 
 # Define shared clones for cluster 1 and cluster 2
@@ -57,7 +57,7 @@ subset_hcv.flashseq <- readRDS(file = ".../hcv_flashseq_blfu.rds")
 # Clustering
 ElbowPlot(subset_hcv.flashseq, ndims = 50)
 subset_hcv.flashseq <- FindNeighbors(subset_hcv.flashseq, dims = 1:10)
-subset_hcv.flashseq <- RunUMAP(subset_hcv.flashseq, dims = 1:15, n.neighbors = 20, min.dist = 0.01)
+subset_hcv.flashseq <- RunUMAP(subset_hcv.flashseq, dims = 1:10, n.neighbors = 30, min.dist = 0.1)
 
 # Figure 4E
 DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, cols = c("grey30", "grey80"), label.box = F, pt.size = 1.3, group.by = "Timepoint", order = F)
@@ -126,7 +126,7 @@ for(comp in combinations) {
 
 # Define genes to plot
 deg_list <- c("MYL6", "HLA-DRA", "ISG15", "CD74", "CD38", "CXCL13", "CCR5", "GZMA", "IRF4", "ZFP36L2", "IL7R", "MAL",
-              "IGF2R", "COL6A3", "LAG3", "PTMS", "ZBTB32", "CTLA4", "SMAD3")
+              "IGF2R", "COL6A3", "LAG3", "PTMS", "ZBTB32", "CTLA4", "SMAD3", "SNORD13", "SAMD3", "GZMA", "CCR5", "CD52", "IL32", "TCF7")
 
 plot_list <- list()
 for (comparison_name in names(DEG)) {
@@ -277,8 +277,8 @@ lapply(names(cell_sets), function(name) {
 cat("\n")
 
 # Gene to plot
-gene_list <- c( "STAT1", "MKI67", "NKG7", "CX3CR1", "CD52", "HLA-DRA",
-                "PRDM1", "ISG15", "CD38", "IGF2R", "BCL2", "TCF7", "CCR7", "IL7R")
+gene_list <- c("MKI67", "IL32","IFNG", "CD69", "CD52", "CD38", "STAT1", "CD74",
+               "IL7R", "BCL2", "TCF7", "FOSB", "IL2RA", "ID3", "NELL2", "CCR7")
 
 
 # Filter the list to include only genes present in the Seurat object
