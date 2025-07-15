@@ -139,7 +139,7 @@ hcv_bl_activity <- subset(hcv_bl, cells = common_cells)
 hcv_bl_activity[["GENE_ACTIVITY"]] <- CreateAssayObject(counts = auc_data[, common_cells])
 DefaultAssay(hcv_bl_activity) <- "GENE_ACTIVITY"
 
-tf_list <- c("TCF7-TF", "SMAD3-TF",
+tf_list <- c("TCF7-TF", "NKFB1-TF",
              "STAT1-TF", "PRDM1-TF")
 
 # Figure 3C
@@ -202,10 +202,14 @@ hcv_bl@meta.data <- hcv_bl@meta.data[, !grepl("^AUCell_", colnames(hcv_bl@meta.d
 hcv_bl <- run_aucell_gsea(hcv_bl, hcv_noQC, ".../Fig 3E/") # Note: Path from user code
 
 # 2. Plot specific features for Figure 3E
-p1 <- FeaturePlot(hcv_bl, features = "BCL2", pt.size = 3, order = TRUE, cols = c("grey90", "red3"), min.cutoff = "q5", max.cutoff = "q95") &
-  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) & ggtitle("BCL2")
-p2 <- FeaturePlot(hcv_bl, features = "AUCell_composite_GSE14308_TH1_VS_NAIVE_CD4_TCELL", pt.size = 3, order = TRUE, cols = c("grey90", "red3"), min.cutoff = "q5", max.cutoff = "q95") &
-  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) & ggtitle("Th1 Signature")
+p1 <- FeaturePlot(hcv_bl, features = "BCL2", pt.size = 3, order = TRUE, min.cutoff = "q5", max.cutoff = "q95") &
+  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) & ggtitle("BCL2") &
+  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4"))
+
+p2 <- FeaturePlot(hcv_bl, features = "AUCell_composite_GSE14308_TH1_VS_NAIVE_CD4_TCELL", pt.size = 3, order = TRUE, min.cutoff = "q5", max.cutoff = "q95") &
+  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) & ggtitle("Th1 Signature") &
+  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4"))
+
 print(p1 + p2)
 
 features_3e <- c("BCL2", "AUCell_composite_GSE14308_TH1_VS_NAIVE_CD4_TCELL")
@@ -253,7 +257,7 @@ cds <- as.cell_data_set(hcv_bl, group.by = "seurat_clusters")
 cds <- cluster_cells(cds, reduction_method = "UMAP")
 
 # Learn the trajectory graph on the UMAP reduction
-cds <- learn_graph(cds, use_partition = FALSE, learn_graph_control = list(minimal_branch_len = 25, ncenter = 200))
+cds <- learn_graph(cds, use_partition = FALSE, learn_graph_control = list(minimal_branch_len = 25, ncenter = 150))
 
 # Identify the trajectory root
 pr_graph_coords <- cds@principal_graph_aux$UMAP$pr_graph_proj
@@ -341,8 +345,8 @@ hcv_bl@meta.data[cells_c1_unique, "clone_category"] <- "Unique_Cluster1"
 hcv_bl@meta.data[cells_c2_unique, "clone_category"] <- "Unique_Cluster2"
 
 # Define the genes for the heatmap
-genes_for_heatmap <- c( "HLA-DRA", "CD69", "CD52", "CD38", "CCR5", "IL32", "NR4A3", "MKI67",  "GZMA",  "CXCL13",
-                        "PTPN13", "KLF6",  "BCL2", "TCF7", "IL7R", "SELL")
+genes_for_heatmap <- c("BCL2", "BACH2", "FOXO4", "SELL", "IGF2R",
+                       "CD74", "STAT1", "LAG3", "CD38","IFNG", "MYB")
 
 cells_c1_all <- WhichCells(hcv_bl, expression = seurat_clusters == 1)
 cells_c1_shared <- WhichCells(hcv_bl, expression = seurat_clusters == 1 & TCRnt %in% shared_clones)
