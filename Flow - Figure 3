@@ -1,4 +1,4 @@
-### Figure 3 - Flow Cytometry dimensionality reduction
+### Figure 3 and S6 - Flow Cytometry dimensionality reduction
 
 library(Matrix)
 library(flowCore)
@@ -93,7 +93,7 @@ sce <- runDR(sce, "TSNE", features = "type", cells = 100)
 # Clustering of Flow data
 sce <- CATALYST::cluster(sce, features = "type", xdim = 2, ydim = 2, maxK = 3, seed = 1234)
 
-# Merge clusters 1+4, 2+3
+# Merge clusters 1+4 and 2+3 since there are no obvious differences in protein expression
 recode_cluster_id <- recode(sce$cluster_id,
                             "1" = "1",
                             "4" = "1",
@@ -109,7 +109,7 @@ custom_colors <- c(
 )
 
 # Figures
-figure_3F_left <- plotDR(sce, dr = "TSNE", color_by = "recode_cluster_id") + geom_point(size=5.5) + 
+figure_3E_left <- plotDR(sce, dr = "TSNE", color_by = "recode_cluster_id") + geom_point(size=5.5) + 
   scale_color_manual(values = custom_colors) +
   theme_minimal(base_size = 12) +  
   theme(
@@ -117,13 +117,13 @@ figure_3F_left <- plotDR(sce, dr = "TSNE", color_by = "recode_cluster_id") + geo
     plot.background = element_rect(fill = "white", color = NA)) # save 8x8
 
 cdx <- rownames(sce)[c(15, 8, 11, 16, 14, 3, 1, 9)]
-figure_3F_right<- plotDR(sce, "TSNE", scale = T, color_by = cdx, ncol = 4, a_pal = rev(hcl.colors(10, "Spectral"))) + geom_point(size=1.5)+   
+figure_3E_right<- plotDR(sce, "TSNE", scale = T, color_by = cdx, ncol = 4, a_pal = rev(hcl.colors(10, "Spectral"))) + geom_point(size=1.5)+   
   theme(
     panel.background = element_rect(fill = "white", color = NA),
     plot.background = element_rect(fill = "white", color = NA))#18x12
 
 # Plot based on gating (effector/stem-like)
-figure_3G <- plotDR(sce, "TSNE", color_by = "diffstate",  ncol = 4) + geom_point(size=5.5) + theme_minimal(base_size = 12) +  
+figure_3F <- plotDR(sce, "TSNE", color_by = "diffstate",  ncol = 4) + geom_point(size=5.5) + theme_minimal(base_size = 12) +  
   theme(
     panel.background = element_rect(fill = "white", color = NA),
     plot.background = element_rect(fill = "white", color = NA))+ 
@@ -131,4 +131,4 @@ figure_3G <- plotDR(sce, "TSNE", color_by = "diffstate",  ncol = 4) + geom_point
 
 # Plot all markers
 cdx <- rownames(sce)[c(1,2,3,5,6,7,8,9,10,11,12,14,15,16)] #for all timepoints
-figure_S4 <- plotDR(sce, "TSNE", scale = T, color_by = cdx, ncol = 4, a_pal = rev(hcl.colors(10, "Spectral"))) + geom_point(size=1.5) #18x12
+figure_S6 <- plotDR(sce, "TSNE", scale = T, color_by = cdx, ncol = 4, a_pal = rev(hcl.colors(10, "Spectral"))) + geom_point(size=1.5) #18x12
