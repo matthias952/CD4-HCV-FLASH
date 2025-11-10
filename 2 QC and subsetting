@@ -10,6 +10,7 @@ hcv.flashseq <- readRDS(file =
 # Feature counts and mitochondrial gene content
 hcv.flashseq[["percent.mt"]] <- PercentageFeatureSet(hcv.flashseq, pattern = "^MT-")
 
+# Figure 2C - first part
 # Inspect raw data
 VlnPlot(hcv.flashseq, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
 
@@ -37,10 +38,65 @@ VlnPlot(hcv.flashseq, group.by = "seurat_clusters", ncol = 5, features = c("nFea
                                                                  "PPBP", "PF4", "ITGA2B", "ITGB3", "GP1BA", # Platelets
                                                                  "TRDC", "TRGC1", "TRGC2")) # gd T cells
 
+# Supplementary Figure 2D - Low quality cluster (excluded)
+# Find differentially expressed genes
+all_deg_results <- FindAllMarkers(hcv.flashseq, group.by = "seurat_clusters", min.pct = 0, log2FC_threshold = 0)
+
+# Volcano plot parameters
+log2FC_threshold <- 0.5
+p_val_threshold <- 0.05
+
+plot_list <- list()
+for (cluster_name in unique(all_deg_results$cluster)) {
+  
+  comparison_data <- all_deg_results %>%
+    filter(cluster == cluster_name)
+  
+  comparison_data <- comparison_data %>%
+    mutate(
+      significance = ifelse((avg_log2FC > log2FC_threshold | avg_log2FC < -log2FC_threshold) & p_val_adj < p_val_threshold, "Significant", "Not Significant")
+    )
+  
+  genes_to_label <- comparison_data %>%
+    filter(significance == "Significant")
+  
+  # Create volcano plot 🌋
+  volcano_plot <- ggplot(comparison_data, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+    geom_point(aes(color = significance), alpha = 0.8, size = 2.5) +
+    geom_text_repel(
+      data = genes_to_label,
+      aes(label = gene),
+      color = "black",
+      size = 3.5,
+      fontface = "bold", force = 2,
+      max.overlaps = 10,
+      segment.color = "grey50"
+    ) +
+    scale_color_manual(values = c("Significant" = "red", "Not Significant" = "grey"), name = "") +
+    geom_vline(xintercept = c(-log2FC_threshold, log2FC_threshold), linetype = "dashed", color = "blue") +
+    geom_hline(yintercept = -log10(p_val_threshold), linetype = "dashed", color = "blue") +
+    labs(
+      title = paste("DEGs for Cluster", cluster_name),
+      x = "Log2 Fold Change",
+      y = "-Log10 Adjusted P-value"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "top")
+  
+  plot_list[[as.character(cluster_name)]] <- volcano_plot
+}
+
+# Supplementary figure 2D
+print(plot_list[[4]])
+
 ## Remove clusters
-# Cluster 3 is low quality cells
+# Cluster 3 is stressed / low quality
 # Cluster 6 and 7 are contamination (B cells)
 subset_hcv.flashseq <- subset(hcv.flashseq, subset = seurat_clusters %in% c("0", "1", "2", "4", "5"))
+
+# Supplementary Figure 2C - second part
+VlnPlot(subset_hcv.flashseq, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
 
 ## Downstream analysis
 # Remove TCR, ribosomal and mitochondrial genes
@@ -54,13 +110,16 @@ hcv.flashseq <- hcv.flashseq[ ! rownames(hcv.flashseq) %in% genes_to_remove, ]
 all_hcv.flashseq <- hcv.flashseq
 # Figure 3
 chronic_hcv.flashseq <- subset(hcv.flashseq, subset = Timepoint %in% c("BL", "FU"))
+# Figure 3
+active_hcv.flashseq <- subset(subset_hcv.flashseq, subset = Timepoint %in% c("BL", "acute"))
 # Figure 4
 baseline_hcv.flashseq <- subset(hcv.flashseq, subset = Timepoint == "BL")
 
 seurat_objects <- list(
   all = all_hcv.flashseq,
   baseline = baseline_hcv.flashseq,
-  bl_fu = chronic_hcv.flashseq
+  bl_fu = chronic_hcv.flashseq,
+  active = active_hcv.flashseq
 )
 
 for (name in names(seurat_objects)) {
@@ -78,3 +137,4 @@ for (name in names(seurat_objects)) {
 saveRDS(seurat_objects$all, file = ".../hcv_flashseq_all.rds")
 saveRDS(seurat_objects$baseline, file = ".../hcv_flashseq_bl.rds")
 saveRDS(seurat_objects$bl_fu, file = ".../hcv_flashseq_blfu.rds")
+saveRDS(seurat_objects$active, file = ".../hcv_flashseq_active.rds")
