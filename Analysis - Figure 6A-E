@@ -9,6 +9,8 @@ library(purrr)
 library(rstatix)
 library(AUCell)
 library(clusterProfiler)
+library(DESeq2)
+library(tidyr)
 
 # Functions
 prepare_noQC_object <- function(path) {
@@ -65,43 +67,142 @@ run_aucell_gsea <- function(main_seu, no_qc_seu, gmt_path) {
 # Load complete seurat object
 subset_hcv.flashseq <- readRDS(file = ".../hcv_flashseq_all.rds")
 
-# Fibure 6A - DEG Heatmap
+# Figure 6A - pseudobulk DEG heatmap
 variable_meta <- "Timepoint"
-Idents(subset_hcv.flashseq) <- "Timepoint"
-conditions <- unique(subset_hcv.flashseq@meta.data[[variable_meta]])
-combinations <- combn(conditions, 2)
+counts_matrix <- GetAssayData(subset_hcv.flashseq, slot = "counts")
+meta_data <- subset_hcv.flashseq@meta.data %>%
+  rownames_to_column("cell_id") %>%
+  select(cell_id, Patient, Timepoint)
 
-# Calculate DEGs with at least 2 fold change and 10 percent expression
-deg_results_list <- lapply(1:ncol(combinations), function(i) {
+# Create pseudobulk samples by summing counts per patient per timepoint
+pseudobulk_list <- list()
+conditions <- unique(meta_data$Timepoint)
+
+# Aggregate counts for each patient-timepoint combination
+patient_timepoint_combinations <- meta_data %>%
+  select(Patient, Timepoint) %>%
+  distinct() %>%
+  unite("sample_id", Patient, Timepoint, sep = "_", remove = FALSE)
+
+# Calculate cell counts for each patient-timepoint combination
+cell_counts <- meta_data %>%
+  group_by(Patient, Timepoint) %>%
+  summarise(cell_count = n(), .groups = "drop") %>%
+  unite("sample_id", Patient, Timepoint, sep = "_", remove = FALSE)
+
+# Filter for combinations with at least 30 cells
+patient_timepoint_combinations <- patient_timepoint_combinations %>%
+  inner_join(cell_counts %>% select(sample_id, cell_count), by = "sample_id") %>%
+  filter(cell_count >= 30)
+
+# Print number of dropped samples
+print(paste("Dropped", sum(cell_counts$cell_count < 30), "samples with fewer than 30 cells"))
+
+
+# Create pseudobulk count matrix
+pseudobulk_counts <- matrix(0, nrow = nrow(counts_matrix), 
+                            ncol = nrow(patient_timepoint_combinations))
+rownames(pseudobulk_counts) <- rownames(counts_matrix)
+colnames(pseudobulk_counts) <- patient_timepoint_combinations$sample_id
+
+# Sum counts for each pseudobulk sample
+for(i in 1:nrow(patient_timepoint_combinations)) {
+  patient <- patient_timepoint_combinations$Patient[i]
+  timepoint <- patient_timepoint_combinations$Timepoint[i]
+  
+  # Get cells for this patient-timepoint combination
+  cells_subset <- meta_data %>%
+    filter(Patient == patient & Timepoint == timepoint) %>%
+    pull(cell_id)
+  
+  if(length(cells_subset) > 0) {
+    # Sum counts across cells
+    pseudobulk_counts[, i] <- rowSums(counts_matrix[, cells_subset, drop = FALSE])
+  }
+}
+
+# Create pseudobulk metadata
+pseudobulk_meta <- patient_timepoint_combinations %>%
+  column_to_rownames("sample_id")
+
+pct_expressed <- rowSums(GetAssayData(subset_hcv.flashseq, slot = "counts") > 0) / ncol(subset_hcv.flashseq)
+keep_genes_sc <- pct_expressed >= 0.02
+
+# Filter out genes with very low expression across pseudobulk samples
+# Keep genes expressed in at least 2 samples with at least 10 counts
+keep_genes_pb <- rowSums(pseudobulk_counts >= 20) >= 2
+keep_genes <- keep_genes_sc & keep_genes_pb
+
+pseudobulk_counts_filtered <- pseudobulk_counts[keep_genes, ]
+
+print(paste("Retained", nrow(pseudobulk_counts_filtered), "genes for pseudobulk analysis"))
+print(paste("Created", ncol(pseudobulk_counts_filtered), "pseudobulk samples"))
+
+# Perform pairwise DEG analysis using DESeq2
+combinations <- combn(conditions, 2)
+deg_results_list <- list()
+
+for(i in 1:ncol(combinations)) {
   ident1 <- combinations[1, i]
   ident2 <- combinations[2, i]
   
-  # Using FindMarkers for the comparison
-  markers <- FindMarkers(
-    subset_hcv.flashseq,
-    ident.1 = ident1,
-    ident.2 = ident2,
-    logfc.threshold = 1.0, 
-    min.pct = 0.1,         
-    test.use = "wilcox"      
+  print(paste("Analyzing:", ident1, "vs", ident2))
+  
+  # Subset pseudobulk data for this comparison
+  samples_subset <- pseudobulk_meta %>%
+    filter(Timepoint %in% c(ident1, ident2)) %>%
+    rownames()
+  
+  if(length(samples_subset) < 4) {  # Need at least 2 samples per group
+    warning(paste("Insufficient samples for", ident1, "vs", ident2, "comparison"))
+    next
+  }
+  
+  counts_subset <- pseudobulk_counts_filtered[, samples_subset]
+  meta_subset <- pseudobulk_meta[samples_subset, , drop = FALSE]
+  
+  # Create DESeq2 object
+  dds <- DESeqDataSetFromMatrix(
+    countData = counts_subset,
+    colData = meta_subset,
+    design = ~ Timepoint
   )
-  # Add gene names and comparison info to the results
-  markers$gene <- rownames(markers)
-  markers$comparison <- paste0(ident1, "_vs_", ident2)
-  return(markers)
-})
+  
+  # Set reference level
+  dds$Timepoint <- relevel(factor(dds$Timepoint), ref = ident2)
+  
+  # Run DESeq2
+  dds <- DESeq(dds, quiet = TRUE)
+  
+  # Get results
+  res <- results(dds, 
+                 contrast = c("Timepoint", ident1, ident2),
+                 alpha = 0.05)
+  
+  # Convert to data frame and add metadata
+  res_df <- as.data.frame(res) %>%
+    rownames_to_column("gene") %>%
+    filter(!is.na(padj)) %>%
+    mutate(comparison = paste0(ident1, "_vs_", ident2))
+  
+  deg_results_list[[i]] <- res_df
+}
 
-# Combine into single data frame
+# Combine results
 all_deg_results <- bind_rows(deg_results_list)
 
-# Filter results
+# Filter results (similar to original but using DESeq2 output)
 all_deg_results_sig <- all_deg_results %>%
-  filter(p_val_adj < 0.05) %>%
+  filter(padj < 0.05) %>%                    # Adjusted p-value
+  #filter(abs(log2FoldChange) >= 1.0) %>%     # Log2 fold change threshold
   filter(!grepl("^TR[ABDG]V", gene)) %>%
   filter(!grepl("^ENSG", gene)) %>%
+  arrange(desc(abs(padj))) %>%     # Order by effect size
   distinct(gene) %>%
-  slice_head(n = 300) %>%
+  slice_head(n = 1000) %>%
   pull(gene)
+
+print(paste("Found", length(all_deg_results_sig), "significant DEGs for heatmap"))
 
 # Create expression matrix for heatmap
 expression_matrix <- subset(subset_hcv.flashseq, features = all_deg_results_sig)
@@ -113,13 +214,37 @@ distance_matrix <- dist(t(expr_data_scaled))
 cluster_result <- hclust(distance_matrix, method = "average")
 ordered_genes <- rownames(expr_data)[cluster_result$order]
 
-# Final heatmap
-DoHeatmap(expression_matrix, features = ordered_genes, 
+# Pseudobulk heatmap
+pseudobulk_expr <- pseudobulk_counts_filtered[all_deg_results_sig, , drop = FALSE]
+
+# Remove any genes with all zeros
+pseudobulk_expr <- pseudobulk_expr[rowSums(pseudobulk_expr) > 0, , drop = FALSE]
+
+# Create Seurat object from pseudobulk data
+pseudobulk_seurat <- CreateSeuratObject(
+  counts = pseudobulk_expr,
+  meta.data = pseudobulk_meta,
+  project = "PseudobulkDEG"
+)
+
+# Normalize the data for visualization
+pseudobulk_seurat <- NormalizeData(pseudobulk_seurat, 
+                                   normalization.method = "LogNormalize",
+                                   scale.factor = 10000)
+
+# Scale data across samples for heatmap
+pseudobulk_seurat <- ScaleData(pseudobulk_seurat, features = all_deg_results_sig)
+
+# Create heatmap
+DoHeatmap(pseudobulk_seurat, 
+          features = ordered_genes,
           group.by = "Timepoint",
-          cells = NULL) + theme(axis.text.y = element_text(size = 6))
+          slot = "scale.data") + 
+  theme(axis.text.y = element_text(size = 6)) +
+  ggtitle("Pseudobulk Heatmap - Standard Scaling")
 
 
-# Figure 6B - MDS Plot
+# Supplemenatry Figure 11A - MDS Plot
 # Pseudobulk expression data
 avg_expression <- AggregateExpression(subset_hcv.flashseq, group.by = "Timepoint", assays = "RNA")
 rna_avg_expression <- avg_expression$RNA
@@ -172,7 +297,7 @@ features_to_plot <- map_chr(base_names, ~{
 feature_order <- c(3, 1, 4, 5, 2, 6)
 features_to_plot <- features_to_plot[feature_order]
 
-# Step 4: Generate violin plots
+# Generate violin plots
 VlnPlot(
   subset(subset_hcv.flashseq, subset = Naive != "Naive" & Timepoint %in% c("FU", "SPR")),
   features = features_to_plot,
@@ -210,19 +335,40 @@ print("Statistics for Figure 6D AUCell Scores:")
 print(stats_df_6d)
 
 
-# Figure 6E
-genes_fig6e <- c("CCR7", "TCF7", "LEF1", "PTPN13", "PDCD1", "TIGIT")
+# Supplementary Figure 11B
+genes_fig11b <- c("CCR7", "TCF7", "LEF1", "PTPN13", "PDCD1", "TIGIT")
 
-# Plotting
-VlnPlot(
-  subset(subset_hcv.flashseq, subset = Naive != "Naive" & Timepoint %in% c("FU", "SPR")),
-  features = genes_fig6e,
-  ncol = 3,
-  pt.size = 0, # 0.1 for PTPN13 and PDCD1
-  cols = timepoint_colors
-) & NoLegend() & theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+# Get expression data for non-naive FU/SPR cells
+non_naive_cells <- WhichCells(subset_hcv.flashseq, expression = Naive != "Naive" & Timepoint %in% c("FU", "SPR"))
+expr_data <- GetAssayData(subset_hcv.flashseq, assay = "RNA", slot = "data")[genes_fig11b, non_naive_cells]
+metadata <- subset_hcv.flashseq@meta.data[non_naive_cells, ]
 
-stats_df_6e <- purrr::map_dfr(genes_fig6e, ~{
+# Create long format data for plotting
+plot_data_long <- purrr::map_dfr(genes_fig11b, ~{
+  gene_expr <- expr_data[.x, ]
+  data.frame(
+    Gene = .x,
+    Expression = gene_expr,
+    Timepoint = metadata$Timepoint,
+    Cell = names(gene_expr)
+  )
+})
+
+# Box plots
+ggplot(plot_data_long, aes(x = Timepoint, y = Expression, color = Timepoint)) +
+  geom_beeswarm(alpha = 0.4, size = 0.8) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA, width = 2, color = "grey30", fill = "grey90") +
+  facet_wrap(~Gene, scales = "free_y", nrow = 2) +
+  scale_color_manual(values = timepoint_colors) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.title.x = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(y = "Expression Level", title = "Gene Expression: FU vs SPR")
+
+stats_df_11b <- purrr::map_dfr(genes_fig11b, ~{
   # Get expression data for the gene
   dat <- GetAssayData(subset_hcv.flashseq, assay = "RNA", slot = "data")[.x, ]
   
@@ -244,22 +390,42 @@ stats_df_6e <- purrr::map_dfr(genes_fig6e, ~{
   mutate(p_adj_BH = p.adjust(p_value, method = "BH"))
 
 print("Statistics for Figure 6E Gene Expression:")
-print(stats_df_6e)
+print(stats_df_11b)
 
+# Figure 6F
+genes_fig6f <- c("TOX", "TOX2")
 
-# Figure 6G
-genes_fig6g <- c("TOX", "TOX2")
+# Get expression data for non-naive FU/SPR cells
+non_naive_cells <- WhichCells(subset_hcv.flashseq, expression = Naive != "Naive" & Timepoint %in% c("FU", "SPR"))
+expr_data <- GetAssayData(subset_hcv.flashseq, assay = "RNA", slot = "data")[genes_fig6f, non_naive_cells]
+metadata <- subset_hcv.flashseq@meta.data[non_naive_cells, ]
 
-# Plotting
-VlnPlot(
-  subset(subset_hcv.flashseq, subset = Naive != "Naive" & Timepoint %in% c("FU", "SPR")),
-  features = genes_fig6g,
-  ncol = 1, 
-  pt.size = 0, # 0.1 for TOX2
-  cols = timepoint_colors
-) & NoLegend() & theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+# Create long format data for plotting
+plot_data_long <- purrr::map_dfr(genes_fig6f, ~{
+  gene_expr <- expr_data[.x, ]
+  data.frame(
+    Gene = .x,
+    Expression = gene_expr,
+    Timepoint = metadata$Timepoint,
+    Cell = names(gene_expr)
+  )
+})
 
-stats_df_6g <- purrr::map_dfr(genes_fig6g, ~{
+# Box plots
+ggplot(plot_data_long, aes(x = Timepoint, y = Expression, color = Timepoint)) +
+  geom_beeswarm(alpha = 0.4, size = 0.8) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA, width = 2, color = "grey30", fill = "grey90") +
+  facet_wrap(~Gene, scales = "free_y", nrow = 2) +
+  scale_color_manual(values = timepoint_colors) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.title.x = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(y = "Expression Level", title = "Gene Expression: FU vs SPR")
+
+stats_df_6f <- purrr::map_dfr(genes_fig6f, ~{
   # Get expression data for the gene
   dat <- GetAssayData(subset_hcv.flashseq, assay = "RNA", slot = "data")[.x, ]
   
@@ -280,7 +446,7 @@ stats_df_6g <- purrr::map_dfr(genes_fig6g, ~{
 }) %>% 
   mutate(p_adj_BH = p.adjust(p_value, method = "BH"))
 
-print("Statistics for Figure 6G Gene Expression:")
-print(stats_df_6g)
+print("Statistics for Figure 6E Gene Expression:")
+print(stats_df_6f)
 
 
