@@ -15,6 +15,7 @@ library(SeuratWrappers)
 library(monocle3)
 library(Biobase)
 library(scMINER)
+library(vegan)
 
 
 set.seed(123)
@@ -154,7 +155,7 @@ VlnPlot(hcv_bl_activity_filtered,
 statistics <- filter(da_results_TF, feature_basename %in% c("TCF7", "SMAD3", "STAT1", "PRDM1"))
 print(statistics)
 
-# GSEA
+# Figure 3D - gene signatures
 hcv_bl$cells <- paste0(hcv_bl$Plate, hcv_bl$Well)
 hcv_noQC <- prepare_noQC_object(".../hcv_flashseq_CD4_A1P12removed.rds")
 hcv_bl <- run_aucell_gsea(hcv_bl, hcv_noQC, ".../Genesets/Fig 3D/") # Note: Path from user code
@@ -197,59 +198,8 @@ stats_df_3d <- purrr::map_dfr(features_3d, ~{
 print("Statistics for Figure 3D AUCell Scores:")
 print(stats_df_3d)
 
-# Figure 3E
-hcv_bl@meta.data <- hcv_bl@meta.data[, !grepl("^AUCell_", colnames(hcv_bl@meta.data))]
-hcv_bl <- run_aucell_gsea(hcv_bl, hcv_noQC, ".../Fig 3E/") # Note: Path from user code
 
-# 2. Plot specific features for Figure 3E
-p1 <- FeaturePlot(hcv_bl, features = "BCL2", pt.size = 3, order = TRUE, min.cutoff = "q5", max.cutoff = "q95") &
-  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) & ggtitle("BCL2") &
-  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4"))
-
-p2 <- FeaturePlot(hcv_bl, features = "AUCell_composite_GSE14308_TH1_VS_NAIVE_CD4_TCELL", pt.size = 3, order = TRUE, min.cutoff = "q5", max.cutoff = "q95") &
-  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) & ggtitle("Th1 Signature") &
-  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4"))
-
-print(p1 + p2)
-
-features_3e <- c("BCL2", "AUCell_composite_GSE14308_TH1_VS_NAIVE_CD4_TCELL")
-
-# 2. Calculate statistics using a Wilcoxon test for each feature
-stats_df_3e <- purrr::map_dfr(features_3e, ~{
-  non_naive_cells <- WhichCells(hcv_bl, expression = Naive != "Naive")
-  
-  # Extract AUCell scores for non-naive cells
-  cells_c1 <- intersect(WhichCells(hcv_bl, idents = "1"), non_naive_cells)
-  cells_c2 <- intersect(WhichCells(hcv_bl, idents = "2"), non_naive_cells)
-  
-  # Get data differently depending on the feature type (gene vs. metadata)
-  if (.x %in% rownames(GetAssayData(hcv_bl, assay = "RNA"))) {
-    # For a gene like BCL2, get data from the RNA assay
-    feature_data <- GetAssayData(hcv_bl, assay = "RNA", slot = "data")[.x, ]
-  } else {
-    # For AUCell scores, get data from the object's metadata
-    feature_data <- hcv_bl@meta.data[[.x]]
-    names(feature_data) <- rownames(hcv_bl@meta.data) # Ensure cells are named
-  }
-  
-  # Run the Wilcoxon test
-  res <- wilcox.test(feature_data[cells_c1], feature_data[cells_c2])
-  
-  # Return a structured table (tibble) with the results
-  tibble(
-    Feature = .x,
-    p_value = res$p.value
-  )
-}) %>% 
-  # 3. Adjust p-values for multiple comparisons
-  mutate(p_adj_BH = p.adjust(p_value, method = "BH"))
-
-# 4. Print the final statistics table
-print("Statistics for Figure 3E Feature Plots:")
-print(stats_df_3e)
-
-
-# Figure 3I - Monocle 3 trajectory analysis
+# Figure 3G - Monocle 3 trajectory analysis
 # Convert to CDS
 cds <- as.cell_data_set(hcv_bl, group.by = "seurat_clusters")
 
@@ -281,9 +231,23 @@ plot_cells(cds, trajectory_graph_color = "black", trajectory_graph_segment_size 
   ggtitle("Pseudotime along Trajectory")
 
 
-# Figure 3J
+# Figure 3H
+# Extract meta data
 meta_data <- hcv_bl@meta.data
+tcr_patient_data <- meta_data[!is.na(meta_data$TCRnt), c("TCRnt", "Patient")]
 
+# Analyze clones shared between individuals
+unique_tcr_patient_pairs <- unique(tcr_patient_data)
+tcr_patient_counts <- table(unique_tcr_patient_pairs$TCRnt)
+public_tcrs <- names(tcr_patient_counts[tcr_patient_counts > 1])
+
+# Store "public" TCRs
+analysis_meta_data <- meta_data[meta_data$TCRnt %in% public_tcrs, ]
+if (nrow(analysis_meta_data) == 0) {
+  print("No public TCRs (shared between patients) were found.")
+}
+
+# Continue with sharing analysis since the data did not included shared clones
 cluster1_tcr <- meta_data$TCRnt[meta_data$seurat_clusters == 1]
 cluster2_tcr <- meta_data$TCRnt[meta_data$seurat_clusters == 2]
 
@@ -329,7 +293,7 @@ ggplot(counts, aes(x = Category, y = Count, fill = Category)) +
         axis.text.x = element_text(angle = 45, hjust = 1))
 
 
-# Figure 3K
+# Figure 3I
 hcv_bl$clone_category <- "Other" # Initialize column
 
 # Get cell barcodes for each category
@@ -389,3 +353,157 @@ pheatmap(
   fontsize_row = 8,
   fontsize_col = 10
 )
+
+# Supplementary Figure 6A - UMAP by patient, epitope and sort batch
+# Patient
+DimPlot(hcv_bl, reduction = "umap", label = F, label.box = F, pt.size = 2, group.by = "Patient")&
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) 
+
+# Epitope
+DimPlot(hcv_bl, reduction = "umap", label = F, label.box = F, pt.size = 2, group.by = "CombinedEpitopes") &
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) 
+
+# Sort batch
+distinct_colors <- c( "#FF6666", "#99CCFF", "#166E1C", "#984EA3", "#FF7F00", "#FFFF33", "#A65628", "#EB32EB")
+DimPlot(hcv_bl, reduction = "umap", label = F, label.box = F, pt.size = 2, group.by = "SortBatch", order = F) &
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) 
+
+# Supplementary Figure 6B - CXCR5 and TBX21 expression
+FeaturePlot(hcv_bl, features = c("CXCR5", "TBX21"), pt.size = 3, order = TRUE, min.cutoff = "q5", max.cutoff = "q95") &
+  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4")) &
+  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+# Supplemenantry Figure 7D  - Shannon index
+meta <- hcv_bl@meta.data
+meta_filtered <- meta %>%
+  filter(!is.na(TCRnt) & TCRnt != "")
+calculate_shannon <- function(tcr_sequences) {
+  # Count frequency of each unique TCR
+  tcr_counts <- table(tcr_sequences)
+  # Calculate Shannon index using vegan package
+  shannon_idx <- diversity(tcr_counts, index = "shannon")
+  return(shannon_idx)
+}
+shannon_data <- meta_filtered %>%
+  group_by(seurat_clusters, Patient) %>%
+  summarise(
+    Shannon = calculate_shannon(TCRnt),
+    n_cells = n(),
+    n_unique_clones = n_distinct(TCRnt),
+    .groups = 'drop'
+  )
+
+shannon_data <- shannon_data %>% filter(n_cells >= 10)
+
+shannon_data$seurat_clusters <- factor(shannon_data$seurat_clusters, 
+                                       levels = c("1", "2"))
+cluster_colors <- c("1" ="#00BFC4",
+                    "2" = "#F8766D")
+ggplot(shannon_data, aes(x = seurat_clusters, y = Shannon, fill = seurat_clusters)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(aes(shape = Patient), width = 0.2, size = 2, alpha = 0.6) +
+  scale_fill_manual(values = cluster_colors) +
+  theme_classic() +
+  labs(
+    title = "TCR Shannon Diversity Index by seurat_clusters",
+    x = "seurat_clusters",
+    y = "Shannon Diversity Index"
+  ) +
+  coord_cartesian(ylim = c(1, 5)) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text = element_text(size = 11),
+    axis.title = element_text(size = 12, face = "bold")
+  )
+
+
+### Acute BL subclustering
+# Import pre-processed object
+active_hcv.flashseq <- readRDS(file =
+                                 ".../active_flashseq.rds")
+
+# Inspect PCAs for dimensionality reduction
+ElbowPlot(active_hcv.flashseq, ndims = 50)
+
+# Use first 20 PCs
+active_hcv.flashseq <- FindNeighbors(active_hcv.flashseq, dims = 1:20)
+active_hcv.flashseq <- FindClusters(active_hcv.flashseq, resolution = 0.7, algorithm = 4)
+active_hcv.flashseq <- RunUMAP(active_hcv.flashseq, dims = 1:20, n.neighbors = 20, min.dist = 0.001)
+
+# Figure 3J
+DimPlot(active_hcv.flashseq, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "seurat_clusters", order = F) & NoLegend()
+
+# Figure 3K
+DimPlot(active_hcv.flashseq, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "seurat_clusters", split.by = "Timepoint", order = F) & NoLegend()
+
+# Figure 3L - cluster specific genes
+variable_meta <- "seurat_clusters"
+Idents(active_hcv.flashseq) <- variable_meta
+
+# Find differentially expressed genes
+all_deg_results <- FindAllMarkers(active_hcv.flashseq, group.by = "seurat_clusters", min.pct = 0, log2FC_threshold = 0)
+
+# Volcano plot parameters
+log2FC_threshold <- 0.5
+p_val_threshold <- 0.05
+
+# Take top genes
+gene_list <- c("DUSP2", "NR4A2", "DUSP4", "SLC2A3", "JUNB", "TGFB1", "DUSP5", "ZFP36",
+               "CD52", "MKI67", "CYTOR", "HLA-DRA", "B2M", "ISG20", "PFN1",
+               "BCL2", "IL7R", "CCR7", "SELL", "TCF7", "NELL2", "LAG3", "IGF2R", "SATB1", "CXCR4")
+
+# Create expression data frame
+variable_meta <- "seurat_clusters"
+expression_data <- GetAssayData(active_hcv.flashseq, assay = "RNA", slot = "data")[gene_list, , drop = FALSE]
+meta_data <- active_hcv.flashseq@meta.data[, variable_meta, drop = FALSE]
+heatmap_data <- as.data.frame(t(as.matrix(expression_data))) %>%
+  mutate(Cluster = meta_data[[variable_meta]]) %>%
+  group_by(Cluster) %>%
+  summarise(across(all_of(gene_list), mean, na.rm = TRUE), .groups = 'drop') %>%
+  as.data.frame() %>% column_to_rownames(var = "Cluster") %>% t()
+cluster_order <- levels(active_hcv.flashseq$seurat_clusters)
+heatmap_data <- heatmap_data[, cluster_order, drop = FALSE]
+
+# Final figure
+pheatmap(heatmap_data, cluster_rows = F,
+         cluster_cols = F, color = colorRampPalette(c("white", "pink", "red", "red4"))(50),
+         scale = "row", 
+         main = "Average Gene Expression by Seurat Cluster", fontsize_row = 10, fontsize_col = 10)
+
+# Supplementary figure 7E
+# Cluster proportions
+active_hcv.flashseq@meta.data$seurat_clusters <- factor(active_hcv.flashseq@meta.data$seurat_clusters, levels = c("1", "2", "3"))
+proportions_df <- active_hcv.flashseq@meta.data %>%
+  dplyr::count(Timepoint, seurat_clusters) %>%
+  group_by(seurat_clusters) %>%
+  mutate(Proportion = n / sum(n) * 100) %>%
+  ungroup()
+ggplot(proportions_df, aes(x = seurat_clusters, y = Proportion, fill = Timepoint)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = c("#0000E2", "#B40000")) +
+  labs(title = "Proportion of Seurat Clusters per Timepoint", y = "Proportion (%)") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),  
+    panel.grid.minor = element_blank()   
+  )
+
+proportions_df <- active_hcv.flashseq@meta.data %>%
+  dplyr::count(Timepoint, seurat_clusters) %>%
+  group_by(Timepoint) %>% # <-- CRITICAL CHANGE: Was group_by(seurat_clusters)
+  mutate(Proportion = n / sum(n) * 100) %>%
+  ungroup()
+ggplot(proportions_df, aes(x = Timepoint, y = Proportion, fill = seurat_clusters)) +
+  geom_col(position = "stack") +
+  labs(title = "Seurat Cluster Distribution per Timepoint",
+       x = "Timepoint",
+       y = "Proportion (%)",
+       fill = "Seurat Cluster") + # Updated legend title
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),  
+    panel.grid.minor = element_blank()   
+  )
