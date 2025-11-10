@@ -7,6 +7,8 @@ library(patchwork)
 library(ggrepel)
 library(rstatix)
 library(pheatmap)
+library(vegan)
+
 
 ## First repeat the clustering of figure 3
 # Load BL object 
@@ -59,7 +61,7 @@ ElbowPlot(subset_hcv.flashseq, ndims = 50)
 subset_hcv.flashseq <- FindNeighbors(subset_hcv.flashseq, dims = 1:10)
 subset_hcv.flashseq <- RunUMAP(subset_hcv.flashseq, dims = 1:10, n.neighbors = 30, min.dist = 0.1)
 
-# Figure 4E
+# Figure 4F - left
 DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, cols = c("grey30", "grey80"), label.box = F, pt.size = 1.3, group.by = "Timepoint", order = F)
 
 # Merge Clusters from BL with cHCV object
@@ -89,11 +91,11 @@ subset_hcv.flashseq$BLclustTime <- final_labels
 print("Cell counts per category in the new 'BLclustTime' column:")
 table(subset_hcv.flashseq$BLclustTime)
 
-# Final plot
+# Figure 4F - right
 DimPlot(subset_hcv.flashseq, group.by = "BLclustTime", cols = c("#00BFC4", "#F8766D", "grey70"), pt.size = 1.3)
 
 
-# Figure 3G - DEG volcano plots
+# Figure 4G - DEG volcano plots
 log2FC_threshold <- 0.5
 p_val_threshold <- 0.05
 variable_meta <- "BLclustTime"
@@ -116,13 +118,20 @@ for(comp in combinations) {
     subset_hcv.flashseq,
     ident.1 = condition1,
     ident.2 = condition2,
-    logfc.threshold = 0, # Keep all genes for plotting
-    min.pct = 0          # Keep all genes for plotting
+    # For Revision
+    test.use = "MAST",
+    latent.vars = "Patient",
+    logfc.threshold = 0, 
+    min.pct = 0         
   )
   
   result$gene <- rownames(result)
   DEG[[comparison_name]] <- result
 }
+
+# Print number of significant DEGs
+Tstem_vs_FU <- DEG[["BL_1_vs_FU"]] %>% filter(p_val_adj < 0.05)
+Teff_vs_FU <- DEG[["FU_vs_BL_2"]] %>% filter(p_val_adj < 0.05)
 
 # Define genes to plot
 deg_list <- c("MYL6", "HLA-DRA", "ISG15", "CD74", "CD38", "CXCL13", "CCR5", "GZMA", "IRF4", "ZFP36L2", "IL7R", "MAL",
@@ -164,6 +173,7 @@ for (comparison_name in names(DEG)) {
       x = "Log2 Fold Change",
       y = "-Log10 Adjusted P-value"
     ) +
+    # scale_x_reverse() + # uncomment to swap x-axis
     theme_minimal()
   
   plot_list[[comparison_name]] <- volcano_plot
@@ -174,21 +184,47 @@ print(plot_list[[1]])
 print(plot_list[[3]])
 
 # Figure 4H
-# Clones shared BL and FU + cluster 1 and 2 backtracing
+# Clones shared BL and FU + cluster 1 and 2 backtracing - exclude clones shared between individuals
 meta_data <- subset_hcv.flashseq@meta.data
 
 # Remove rows with missing TCR information
 meta_data <- meta_data[!is.na(meta_data$TCRnt) & meta_data$TCRnt != "", ]
 
-# Get unique clones for each condition
-bl_1_clones <- unique(meta_data$TCRnt[meta_data$BLclustTime == "BL_1"])
-bl_2_clones <- unique(meta_data$TCRnt[meta_data$BLclustTime == "BL_2"])
-fu_clones <- unique(meta_data$TCRnt[meta_data$BLclustTime == "FU"])
+# First identify public clones (shared between patients) to exclude them
+unique_patients <- unique(meta_data$Patient)
+patient_clones <- list()
+for(patient in unique_patients) {
+  patient_clones[[patient]] <- unique(meta_data$TCRnt[meta_data$Patient == patient])
+}
+
+# Find public clones (shared between at least 2 patients)
+all_clones <- unique(meta_data$TCRnt)
+public_clones <- c()
+
+for(clone in all_clones) {
+  patients_with_clone <- sum(sapply(patient_clones, function(x) clone %in% x))
+  if(patients_with_clone >= 2) {
+    public_clones <- c(public_clones, clone)
+  }
+}
+
+print(paste("Excluding", length(public_clones), "public clones from analysis"))
+
+# Filter out public clones from the analysis
+meta_data_filtered <- meta_data[!meta_data$TCRnt %in% public_clones, ]
+
+print(paste("Cells after excluding public clones:", nrow(meta_data_filtered)))
+print(paste("Cells excluded (with public clones):", nrow(meta_data) - nrow(meta_data_filtered)))
+
+# Get unique clones for each condition (now without public clones)
+bl_1_clones <- unique(meta_data_filtered$TCRnt[meta_data_filtered$BLclustTime == "BL_1"])
+bl_2_clones <- unique(meta_data_filtered$TCRnt[meta_data_filtered$BLclustTime == "BL_2"])
+fu_clones <- unique(meta_data_filtered$TCRnt[meta_data_filtered$BLclustTime == "FU"])
 
 # All BL clones combined
 all_bl_clones <- unique(c(bl_1_clones, bl_2_clones))
 
-# Categorize clones
+# Categorize clones (now excluding public clones)
 unique_bl <- setdiff(all_bl_clones, fu_clones)
 unique_fu <- setdiff(fu_clones, all_bl_clones)
 shared_bl_fu <- intersect(all_bl_clones, fu_clones)
@@ -198,16 +234,16 @@ shared_from_bl1 <- intersect(shared_bl_fu, bl_1_clones)
 shared_from_bl2 <- intersect(shared_bl_fu, bl_2_clones)
 shared_from_both <- intersect(shared_from_bl1, shared_from_bl2)
 
-# Count cells for each category
+# Count cells for each category (using filtered data)
 count_cells <- function(clones, condition = NULL) {
   if (is.null(condition)) {
-    sum(meta_data$TCRnt %in% clones)
+    sum(meta_data_filtered$TCRnt %in% clones)
   } else {
-    sum(meta_data$TCRnt %in% clones & meta_data$BLclustTime == condition)
+    sum(meta_data_filtered$TCRnt %in% clones & meta_data_filtered$BLclustTime == condition)
   }
 }
 
-# Create results table
+# Create results table (excluding public clones)
 results <- data.frame(
   Category = c(
     "Unique BL (total)",
@@ -244,7 +280,8 @@ results <- data.frame(
   )
 )
 
-# Print the results table
+# Print the results table (excluding public clones)
+print("=== RESULTS EXCLUDING PUBLIC CLONES ===")
 print(results)
 
 
@@ -258,7 +295,6 @@ bl_c1_shared_cells <- rownames(metadata_hm[metadata_hm$BLclustTime == "BL_1" & m
 bl_c1_nonshared_cells <- rownames(metadata_hm[metadata_hm$BLclustTime == "BL_1" & !metadata_hm$TCRnt %in% shared_bl_fu, ])
 fu_all_cells <- rownames(metadata_hm[metadata_hm$BLclustTime == "FU", ])
 bl_c2_all_cells <- rownames(metadata_hm[metadata_hm$BLclustTime == "BL_2", ])
-
 
 # Create a list of these cell sets for the heatmap
 cell_sets <- list(
@@ -276,10 +312,9 @@ lapply(names(cell_sets), function(name) {
 })
 cat("\n")
 
-# Gene to plot
+# Genes to plot
 gene_list <- c("MKI67", "IL32","IFNG", "CD69", "CD52", "CD38", "STAT1", "CD74",
                "IL7R", "BCL2", "TCF7", "FOSB", "IL2RA", "ID3", "NELL2", "CCR7")
-
 
 # Filter the list to include only genes present in the Seurat object
 genes_for_heatmap <- gene_list[gene_list %in% rownames(subset_hcv.flashseq)]
@@ -290,7 +325,7 @@ avg_expression_matrix <- sapply(cell_sets, function(cells) {
   rowMeans(full_expression_data[, cells, drop = FALSE], na.rm = TRUE)
 })
 
-# Final plot
+# Final plot for Figure 4i
 pheatmap(
   avg_expression_matrix,
   scale = "row",          # Scale genes to visualize relative expression
@@ -301,3 +336,60 @@ pheatmap(
   fontsize_row = 10,
   fontsize_col = 10
 )
+
+# Figure 4J - Shannon diversity
+meta <- subset_hcv.flashseq@meta.data
+meta_filtered <- meta %>%
+  filter(!is.na(TCRnt) & TCRnt != "")
+calculate_shannon <- function(tcr_sequences) {
+  # Count frequency of each unique TCR
+  tcr_counts <- table(tcr_sequences)
+  # Calculate Shannon index using vegan package
+  shannon_idx <- diversity(tcr_counts, index = "shannon")
+  return(shannon_idx)
+}
+shannon_data <- meta_filtered %>%
+  group_by(Timepoint, Patient) %>%
+  summarise(
+    Shannon = calculate_shannon(TCRnt),
+    n_cells = n(),
+    n_unique_clones = n_distinct(TCRnt),
+    .groups = 'drop'
+  )
+
+shannon_data <- shannon_data %>% filter(n_cells >= 10)
+shannon_data$Timepoint <- factor(shannon_data$Timepoint, 
+                                       levels = c("BL", "FU"))
+cluster_colors <- c("BL" ="#B40000",
+                    "FU" = "#FFC2C2")
+ggplot(shannon_data, aes(x = Timepoint, y = Shannon, fill = Timepoint)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(aes(shape = Patient), width = 0.2, size = 2, alpha = 0.6) +
+  scale_fill_manual(values = cluster_colors) +
+  theme_classic() +
+  labs(
+    title = "TCR Shannon Diversity Index by Timpoint",
+    x = "Timpoint",
+    y = "Shannon Diversity Index"
+  ) +
+  coord_cartesian(ylim = c(1, 5)) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text = element_text(size = 11),
+    axis.title = element_text(size = 12, face = "bold")
+  )
+
+# Supplementary Figure 9C - UMAP by patient, sort batch and epitope restriction
+# Patient
+DimPlot(subset_hcv.flashseq, reduction = "umap", cols = c("#00BFC4", "#F8766D", "grey70"), pt.size = 1.3, group.by = "Patient") &
+  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) 
+
+# Sort batch
+distinct_colors <- c("#FF6666", "#99CCFF", "#166E1C", "#984EA3", "#FF7F00", "#FFFF33", "#A65628", "#EB32EB")
+DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "SortBatch", order = F) &
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+# Epitope
+DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "CombinedEpitopes") &
+  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) 
