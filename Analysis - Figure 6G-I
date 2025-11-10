@@ -1,4 +1,4 @@
-### Figure 6G - 6I
+### Figure 6G - 6H
 
 library(Seurat)
 library(scMINER)
@@ -7,6 +7,10 @@ library(ggplot2)
 library(ggrepel)
 library(readr)
 library(Biobase)
+library(limma)
+library(edgeR)
+library(Matrix)
+
 
 # Define color schemes
 timepoint_col <- c("FU" = "#FFC2C2", "SPR" = "#B2DFEE")
@@ -29,116 +33,174 @@ rownames(activity_matrix) <- gsub("_TF$", "", rownames(activity_matrix))
 seurat_obj[["Activity"]] <- CreateAssayObject(data = activity_matrix)
 
 
-# Figure H - TOX & TOX2 Expression
-
+# Figure G - Differential Activity Analysis
+# Pseudobulk activity volcano plot
 # Filter for non-naive cells from FU and SPR timepoints
 seurat_subset <- subset(seurat_obj, subset = Naive != "Naive" & Timepoint %in% c("FU", "SPR"))
-Idents(seurat_subset) <- "Timepoint"
 
-# Plot TOX and TOX2 expression
-VlnPlot(seurat_subset, 
-        features = c("TOX", "TOX2"), 
-        ncol = 2, 
-        pt.size = 0.1, 
-        cols = timepoint_col) &
-  NoLegend() & 
-  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+# Get TF driver list to filter for TFs only
+hg_driver_symbols <- getDriverList(species_type = "hg", driver_type = "TF")
 
-# Statistical testing for expression
-expression_stats <- function(seurat_obj, genes, group1, group2) {
-  results <- data.frame()
-  
-  for (gene in genes) {
-    expr_data <- GetAssayData(seurat_obj, assay = "RNA", slot = "data")[gene, ]
-    cells_g1 <- WhichCells(seurat_obj, idents = group1)
-    cells_g2 <- WhichCells(seurat_obj, idents = group2)
+# Extract activity matrix and filter for TFs
+activity_data <- GetAssayData(seurat_subset, assay = "Activity", slot = "data")
+activity_data_TF <- activity_data[rownames(activity_data) %in% hg_driver_symbols, ]
+
+print(paste("Number of TFs in analysis:", nrow(activity_data_TF)))
+
+# Create pseudobulk by aggregating cells per patient
+metadata <- seurat_subset@meta.data
+metadata$cell_id <- rownames(metadata)
+
+# Aggregate activity by Patient and Timepoint
+pseudobulk_list <- list()
+sample_info <- data.frame()
+
+for(patient in unique(metadata$Patient)) {
+  for(timepoint in unique(metadata$Timepoint)) {
+    # Get cells for this patient-timepoint combination
+    cells <- metadata$cell_id[metadata$Patient == patient & metadata$Timepoint == timepoint]
     
-    expr_g1 <- expr_data[cells_g1]
-    expr_g2 <- expr_data[cells_g2]
-    
-    wilcox_result <- wilcox.test(expr_g1, expr_g2, exact = FALSE)
-    
-    results <- rbind(results, data.frame(
-      Gene = gene,
-      Median_FU = median(expr_g1, na.rm = TRUE),
-      Median_SPR = median(expr_g2, na.rm = TRUE),
-      P_value = wilcox_result$p.value
-    ))
+    if(length(cells) > 0) {
+      # Calculate mean activity across cells for this patient-timepoint
+      sample_name <- paste(patient, timepoint, sep = "_")
+      pseudobulk_list[[sample_name]] <- Matrix::rowMeans(activity_data_TF[, cells, drop = FALSE])
+      
+      # Store sample information
+      sample_info <- rbind(sample_info, data.frame(
+        Sample = sample_name,
+        Patient = patient,
+        Timepoint = timepoint,
+        n_cells = length(cells)
+      ))
+    }
   }
-  
-  results$P_value_Adjusted <- p.adjust(results$P_value, method = "BH")
-  return(results)
 }
 
-expr_results <- expression_stats(seurat_subset, c("TOX", "TOX2"), "FU", "SPR")
-print(expr_results)
+# Convert to matrix
+pseudobulk_matrix <- do.call(cbind, pseudobulk_list)
+colnames(pseudobulk_matrix) <- names(pseudobulk_list)
 
+print("Sample information:")
+print(sample_info)
+print(paste("Pseudobulk matrix dimensions:", paste(dim(pseudobulk_matrix), collapse = " x ")))
 
-# Figure I - Differential Activity Analysis
+# Create design matrix
+design_matrix <- model.matrix(~ 0 + Timepoint, data = sample_info)
+colnames(design_matrix) <- c("FU", "SPR")
+rownames(design_matrix) <- sample_info$Sample
 
-# Perform differential activity analysis
-da_results <- getDA(
-  input_eset = activity_eset,
-  group_by = "Timepoint",
-  g1 = "SPR",
-  g0 = "FU",
-  use_method = "t.test"
+print("Design matrix:")
+print(design_matrix)
+
+# Since activity data can be negative and limma-voom expects non-negative values, add the minimum value + 1
+min_value <- min(pseudobulk_matrix, na.rm = TRUE)
+if(min_value < 0) {
+  pseudobulk_matrix_shifted <- pseudobulk_matrix - min_value + 1
+  print(paste("Shifted activity values by", -min_value + 1, "to make them positive"))
+} else {
+  pseudobulk_matrix_shifted <- pseudobulk_matrix
+}
+
+# Convert to DGEList object
+dge <- DGEList(counts = pseudobulk_matrix_shifted)
+
+# Normalize using TMM (though for activity data, this might not be necessary)
+dge <- calcNormFactors(dge)
+
+# Apply voom transformation
+v <- voom(dge, design_matrix, plot = TRUE)
+
+# Fit linear model
+fit <- lmFit(v, design_matrix)
+
+# Create contrast matrix for SPR vs FU comparison
+contrast_matrix <- makeContrasts(
+  SPR_vs_FU = SPR - FU,
+  levels = design_matrix
 )
 
-# Clean and filter results
-da_results$feature_basename <- gsub("_TF$", "", da_results$feature)
-da_results_filtered <- da_results %>% 
-  filter(g1_pct > 0, g0_pct > 0) %>%
-  mutate(significance = ifelse((abs(log2FC) > 0.25) & (FDR < 0.05), "Significant", "Not Significant"))
+# Apply contrasts
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2)
 
-# Get TF driver list and filter for TFs
-hg_driver_symbols <- getDriverList(species_type = "hg", driver_type = "TF")
-da_results_TF <- da_results_filtered[da_results_filtered$feature_basename %in% hg_driver_symbols, ]
+# Get results
+pseudobulk_results <- topTable(fit2, coef = "SPR_vs_FU", number = Inf, sort.by = "P")
 
-# Set all 0 values to the mininimum value found in the data results
-min_nonzero_fdr <- min(da_results_TF$FDR[da_results_TF$FDR > 0], na.rm = TRUE)
-da_results_TF$FDR[da_results_TF$FDR == 0] <- min_nonzero_fdr
+# Add significance column
+pseudobulk_results$significance <- ifelse(
+  (abs(pseudobulk_results$logFC) > 0.25) & (pseudobulk_results$adj.P.Val < 0.05), 
+  "Significant", 
+  "Not Significant"
+)
 
-# Create volcano plot with all genes
-genes_to_label <- da_results_TF %>% filter(significance == "Significant")
-genes_to_label <- genes_to_label %>% filter(feature_basename %in% c("TOX", "TOX2", "STAT4", "BATF", "NFAT5", "EBF1", "ZEB1", "IKZF4", "KDM5A",
-                                                                    "ETS1", "KLF9", "RUNX3", "SMAD4", "BCL11B", "POU2F1",
-                                                                    "MYC", "KLF3", "STAT2", "LEF1", "IKZF1", "BCLAF1", "KLF6", "ZFP36", "FOXP1",
-                                                                    "FOXO3", "STAT1", "STAT6", "STAT5A", "STAT5B", "ID3", "TCF7", "NR4A3",
-                                                                    "KDM1A", "IRF7", "CREM", "NFATC2", "JUNB", "CTCF", "NR4A2"))
+# Summary of results
+print(paste("Total TFs tested:", nrow(pseudobulk_results)))
+print(paste("Significant TFs (|logFC| > 0.25 & FDR < 0.05):", 
+            sum(pseudobulk_results$significance == "Significant")))
 
-volcano_plot <- ggplot(da_results_TF, aes(x = log2FC, y = -log10(FDR), color = significance)) +
+# Add gene names as a column for plotting
+pseudobulk_results$Gene <- rownames(pseudobulk_results)
+
+# Create volcano plot for pseudobulk results
+genes_to_label_pb <- pseudobulk_results %>% 
+  filter(significance == "Significant") %>%
+  filter(Gene %in% c("TOX", "TOX2", "STAT4", "BATF", "NFAT5", "EBF1", "ZEB1", "IKZF4", "KDM5A",
+                     "ETS1", "KLF9", "RUNX3", "SMAD4", "BCL11B", "POU2F1",
+                     "MYC", "KLF3", "STAT2", "LEF1", "IKZF1", "BCLAF1", "KLF6", "ZFP36", "FOXP1",
+                     "FOXO3", "STAT1", "STAT6", "STAT5A", "STAT5B", "ID3", "TCF7", "NR4A3",
+                     "KDM1A", "IRF7", "CREM", "NFATC2", "JUNB", "CTCF", "NR4A2"))
+
+volcano_plot_pb <- ggplot(pseudobulk_results, aes(x = logFC, y = -log10(adj.P.Val), color = significance)) +
   geom_point(alpha = 0.7, size = 2.5) +
-  geom_text_repel(data = genes_to_label, aes(label = feature_basename), 
+  geom_text_repel(data = genes_to_label_pb, aes(label = Gene), 
                   size = 3.5, color = "black", max.overlaps = 5000, box.padding = 0.5) +
   scale_color_manual(values = c("Significant" = "#E41A1C", "Not Significant" = "grey")) +
   geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed", color = "grey50") +
   geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey50") +
-  labs(title = "Differential TF Activity: SPR vs FU",
+  labs(title = "Pseudobulk Differential TF Activity: SPR vs FU",
        x = "← Increased in FU | log2(Fold Change) | Increased in SPR →",
        y = "-log10(FDR)") +
   theme_minimal() +
   theme(legend.position = "top", plot.title = element_text(hjust = 0.5, face = "bold"))
 
-print(volcano_plot)
+print(volcano_plot_pb)
 
-# Plot TOX activity
+# Figure 6G - right
 VlnPlot(seurat_subset, 
         features = c("TOX", "TOX2"), 
         assay = "Activity", 
         group.by = "Timepoint", 
-        pt.size = 0, 
+        pt.size = 0,
+        ncol = 1,
         cols = timepoint_col) &
   NoLegend() & 
   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
 
-da_results_TF %>%
-  filter(feature_basename %in% c("TOX", "TOX2")) %>%
-  select(feature_basename, g1_tag, g0_tag, g1_avg, g0_avg, log2FC, Pval, FDR, significance) %>%
-  print()
+violin_plot_genes <- c("TOX", "TOX2")
+violin_plot_stats <- pseudobulk_results %>%
+  filter(Gene %in% violin_plot_genes) %>%
+  select(Gene, logFC, P.Value, adj.P.Val)
+print(violin_plot_stats)
 
+# Figure S11E
+# Plot TOX activity
+VlnPlot(seurat_subset, 
+        features = c("ID3", "FOXO3", "LEF1", "MYC", "RUNX3", "BATF", "STAT4", "ZEB1"), 
+        assay = "Activity", 
+        group.by = "Timepoint", 
+        pt.size = 0,
+        ncol = 4,
+        cols = timepoint_col) &
+  NoLegend() & 
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
 
-# Figure J - TOX Regulon Networks
+violin_plot_genes <- c("ID3", "FOXO3", "LEF1", "MYC", "RUNX3", "BATF", "STAT4", "ZEB1")
+violin_plot_stats <- pseudobulk_results %>%
+  filter(Gene %in% violin_plot_genes) %>%
+  select(Gene, logFC, P.Value, adj.P.Val)
+print(violin_plot_stats)
+
+# Figure H - TOX Regulon Networks
 interaction_colors <- c(
   "Positive" = "#D62728",  # Red for positive
   "Negative" = "#1F77B4"   # Blue for negative
