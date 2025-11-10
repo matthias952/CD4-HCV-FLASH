@@ -6,6 +6,9 @@ library(CATALYST)
 library(ggplot2) 
 library(SingleCellExperiment)
 library(dplyr)
+library(stringr)
+library(scater)
+
 
 # Specify directories
 setwd("...") # Ensure this path is correct
@@ -33,8 +36,8 @@ for (i in 1:length(file_names)) {
 
 # Find all the acquired parameters
 common.par <- Reduce(intersect, fcs.par)
-# Remove FSC, SSC and time parameters
-common.par <- common.par[7:22] 
+# Keep FSC, SSC and time parameters for matching
+common.par <- common.par[c(1,4,7:23)]
 
 # Subset the FCS files for fluorescent markers
 dir.create(paste0(getwd(),"/subset/"), showWarnings = FALSE) # Added showWarnings = FALSE
