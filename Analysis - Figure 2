@@ -1,4 +1,4 @@
-### Figure 2
+### Figure 2, S4, S5 and S7C
 
 library(ggplot2)
 library(Seurat)
@@ -193,6 +193,12 @@ FeaturePlot(subset_hcv.flashseq,
               scale_color_gradientn(colors = c("grey90", "pink", "red", "red4")) &
               theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
 
+# Figure 2E
+FeaturePlot(subset_hcv.flashseq, features = composite_cols_2c, pt.size = 1.3, order = TRUE,
+            min.cutoff = "q5", max.cutoff = "q95", split.by = "Timepoint", ncol = 2) & NoLegend() &
+  theme(axis.title = element_blank(), axis.text = element_blank()) & 
+  scale_color_gradientn(colors = c("grey80", "pink", "red", "red4"))
+
 # Figure 2F
 timepoint_col = c("#0000E2", "#B40000", "#FFC2C2", "#B2DFEE")
 DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, cols = timepoint_col, pt.size = 1.3, group.by = "Timepoint", order = F)
@@ -215,10 +221,57 @@ ggplot(proportions_df, aes(x = Timepoint, y = Proportion, fill = seurat_clusters
     panel.grid.minor = element_blank()   # Remove minor grid lines
   ) +  scale_fill_manual(values = c("#65C765", "#359335", "#C1E9C1", "#464646", "#A0A0A0"))
 
-# Supplementary figure 3 A - patient UMAP
+# Supplementary figure 4A - UMAP by patient, epitope and sort batch
+# Patient
 DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "Patient", order = F)
 
-# Supplementary figure 3 B - volanco plots by cluster
+# Epitope
+DimPlot(subset_hcv.flashseq, reduction = "umap", label = F, label.box = F, pt.size = 1.3, group.by = "CombinedEpitopes", order = F)
+
+# Sort batch
+distinct_colors <- c("SortBatch1" = "#B0C4DE", "SortBatch2" = "grey80", "SortBatch3" = "#FF6666", "SortBatch4" = "#EB32EB",  "SortBatch5" = "#166E1C",
+                     "SortBatch6" = "#708090", "SortBatch7" = "#FF8C00")
+DimPlot(subset_hcv.flashseq, reduction = "umap", cols = distinct_colors, pt.size = 1.3, group.by = "SortBatch") &
+  NoLegend() &   theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) 
+
+# Supplementary figure 4B - Sortbatch and cluster quantification
+batch_proportions_df <- subset_hcv.flashseq@meta.data %>%
+  dplyr::count(SortBatch, seurat_clusters) %>%
+  group_by(SortBatch) %>%
+  mutate(Proportion = n / sum(n) * 100) %>%
+  ungroup()
+
+ggplot(batch_proportions_df, aes(x = SortBatch, y = Proportion, fill = seurat_clusters)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = clust.col) +
+  labs(title = "Proportion of Seurat Clusters per Sequencing Batch", y = "Proportion (%)", x = "Batch") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+timepoint_col = c("#0000E2", "#B40000", "#FFC2C2", "#B2DFEE")
+
+sortbatch_proportions_df <- subset_hcv.flashseq@meta.data %>%
+  dplyr::count(SortBatch, Timepoint) %>%
+  group_by(SortBatch) %>%
+  mutate(Proportion = n / sum(n) * 100) %>%
+  ungroup()
+
+ggplot(sortbatch_proportions_df, aes(x = SortBatch, y = Proportion, fill = Timepoint)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = timepoint_col) +
+  labs(title = "Proportion of Seurat Clusters per Sort Batch", y = "Proportion (%)", x = "Sort Batch") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# Supplementary figure 4C - volanco plots by cluster
 variable_meta <- "seurat_clusters"
 Idents(subset_hcv.flashseq) <- variable_meta
 
@@ -282,5 +335,307 @@ for (cluster_name in unique(all_deg_results$cluster)) {
 }
 
 
-print(plot_list[[1]])
+print(plot_list[[1]]) # continue for 2:5
 
+# Supplementary figure 5A - feature plots of specific genes
+FeaturePlot(subset_hcv.flashseq, features = c("TCF7", "TBX21", "CD38", "ICOS"),
+            min.cutoff = "q5", max.cutoff = "q95", pt.size = 1.3, ncol = 4, order = T) &
+  NoLegend() &
+  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4")) &
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+# Supplementary figure S5B - feature plots of polarization signatures
+# Calculate AUCell scores from Figure 1E gene sets
+subset_hcv.flashseq@meta.data <- subset_hcv.flashseq@meta.data[, !grepl("^AUCell_", colnames(subset_hcv.flashseq@meta.data))]
+subset_hcv.flashseq <- run_aucell_gsea(subset_hcv.flashseq, hcv_noQC, ".../Figure 1E/")
+composite_cols <- grep("^AUCell_composite_", colnames(subset_hcv.flashseq@meta.data), value = TRUE)
+
+# Figure S5B top - all data included
+FeaturePlot(subset_hcv.flashseq, features = composite_cols[c(1, 5, 2, 3, 4)], pt.size = 1.3, ncol = 5, order = TRUE, min.cutoff = "q5", max.cutoff = "q95") & 
+  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4"))  & NoLegend() &
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+# Figure S5B top - subset for chronic samples
+FeaturePlot(subset(subset_hcv.flashseq, subset = Timepoint == "BL"), features = composite_cols[c(1, 5, 2, 3, 4)], pt.size = 1.3, ncol = 5, order = TRUE, min.cutoff = "q5", max.cutoff = "q95") & 
+  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4"))  & NoLegend() &
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+# Figure S5B top -subset for acute samples
+FeaturePlot(subset(subset_hcv.flashseq, subset = Timepoint == "acute"), features = composite_cols[c(1, 5, 2, 3, 4)], pt.size = 1.3, ncol = 5, order = TRUE, min.cutoff = "q5", max.cutoff = "q95") & 
+  scale_color_gradientn(colors = c("grey90", "pink", "red", "red4"))  & NoLegend() &
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+# Supplementary figure 5D - Gene expression of score-correlated genes between clusters
+# Define base signature names
+signature_bases <- c(
+  "GSE14308_TH1_VS_NAIVE_CD4_TCELL",
+  "GSE3982_TH2_VS_EFF_MEMORY_CD4_TCELL",
+  "GSE14308_TH17_VS_NAIVE_CD4_TCELL",
+  "GSE16697_TFH_VS_CD4_TCELL",
+  "GSE20366_TREG_VS_NAIVE_CD4_TCELL"
+)
+
+# Path to GMT files
+gmt_path <- ".../Figure 1E"
+
+# Read all gene sets
+gene_sets_list <- list()
+gmt_files <- list.files(gmt_path, pattern = "\\.gmt$", full.names = TRUE)
+
+for (gmt_file in gmt_files) {
+  set_name <- tools::file_path_sans_ext(basename(gmt_file))
+  genes <- read.gmt(gmt_file) %>% 
+    pull(gene) %>% 
+    toupper() %>% 
+    unique()
+  gene_sets_list[[set_name]] <- genes
+}
+
+
+calculate_gene_signature_correlation <- function(seurat_obj, signature_base, gene_sets) {
+  
+  # Get composite score name
+  composite_col <- paste0("AUCell_composite_", signature_base)
+  
+  if (!composite_col %in% colnames(seurat_obj@meta.data)) {
+    warning(paste("Composite score not found:", composite_col))
+    return(NULL)
+  }
+  
+  # Get UP and DN gene lists
+  up_genes <- gene_sets[[paste0(signature_base, "_UP")]]
+  dn_genes <- gene_sets[[paste0(signature_base, "_DN")]]
+  
+  # Filter genes present in the dataset
+  expr_data <- GetAssayData(seurat_obj, assay = "RNA", slot = "data")
+  up_genes_present <- intersect(up_genes, rownames(expr_data))
+  dn_genes_present <- intersect(dn_genes, rownames(expr_data))
+  
+  # Get composite scores
+  composite_scores <- seurat_obj@meta.data[[composite_col]]
+  
+  # Calculate correlations for UP genes
+  up_correlations <- sapply(up_genes_present, function(gene) {
+    gene_expr <- expr_data[gene, ]
+    cor(gene_expr, composite_scores, method = "spearman")
+  })
+  
+  # Calculate correlations for DN genes (note: negative correlation expected)
+  dn_correlations <- sapply(dn_genes_present, function(gene) {
+    gene_expr <- expr_data[gene, ]
+    cor(gene_expr, composite_scores, method = "spearman")
+  })
+  
+  # Combine results
+  results <- data.frame(
+    Gene = c(up_genes_present, dn_genes_present),
+    Correlation = c(up_correlations, dn_correlations),
+    Direction = c(rep("UP", length(up_genes_present)), 
+                  rep("DN", length(dn_genes_present))),
+    Signature = signature_base,
+    stringsAsFactors = FALSE
+  ) %>%
+    arrange(desc(abs(Correlation)))
+  
+  return(results)
+}
+
+# Calculate correlations for all signatures
+all_correlations <- lapply(signature_bases, function(sig) {
+  calculate_gene_signature_correlation(subset_hcv.flashseq, sig, gene_sets_list)
+}) %>% bind_rows()
+
+# Get top 15 genes per signature
+top_genes_per_sig <- all_correlations %>%
+  group_by(Signature) %>%
+  slice_max(order_by = abs(Correlation), n = 15) %>%
+  ungroup()
+
+# Identify genes appearing in multiple top 15 lists
+gene_counts <- top_genes_per_sig %>%
+  dplyr::count(Gene) %>%
+  filter(n > 1)
+
+multi_signature_genes <- gene_counts$Gene
+
+# Function to create bar plot for a signature
+create_correlation_barplot <- function(signature_base) {
+  
+  # Get top 15 genes for this signature
+  plot_data <- all_correlations %>%
+    filter(Signature == signature_base) %>%
+    slice_max(order_by = abs(Correlation), n = 15) %>%
+    mutate(
+      abs_correlation = abs(Correlation),
+      bar_color = ifelse(Correlation < 0, "Negative", "Positive"),
+      is_multi = Gene %in% multi_signature_genes,
+      gene_color = ifelse(is_multi, "red", "black"),
+      gene_face = ifelse(is_multi, "bold", "plain")
+    ) %>%
+    arrange(abs_correlation)
+  
+  # Make Gene a factor to preserve order
+  plot_data$Gene <- factor(plot_data$Gene, levels = plot_data$Gene)
+  
+  # Create named vectors for text formatting
+  gene_colors <- setNames(plot_data$gene_color, plot_data$Gene)
+  gene_faces <- setNames(plot_data$gene_face, plot_data$Gene)
+  
+  # Create plot
+  p <- ggplot(plot_data, aes(x = Gene, y = abs_correlation, fill = bar_color)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = c("Negative" = "grey80", "Positive" = "grey30"),
+                      name = "Correlation Direction") +
+    coord_flip(ylim = c(0, 0.35)) +
+    labs(title = paste("Top 15 Genes -", signature_base),
+         x = "Gene",
+         y = "Absolute Correlation with Composite Score") +
+    theme_bw() +
+    theme(
+      axis.text.y = element_text(colour = gene_colors[levels(plot_data$Gene)],
+                                 face = gene_faces[levels(plot_data$Gene)],
+                                 size = 9),
+      plot.title = element_text(size = 10, face = "bold"),
+      legend.position = "bottom"
+    )
+  
+  return(p)
+}
+
+# Create bar plots for all signatures
+plot_list <- lapply(signature_bases, create_correlation_barplot)
+
+# Display plots
+for (i in seq_along(plot_list)) {
+  print(plot_list[[i]])
+}
+
+# Supplementary figure S5C
+# Function to calculate signature overlap with expression filtering
+calculate_signature_overlap <- function(seurat_obj, gene_sets_list, signature_bases, 
+                                        min_pct_expression = 0) {
+  
+  # Get expression data
+  expr_data <- GetAssayData(seurat_obj, assay = "RNA", slot = "data")
+  
+  # Calculate percentage of cells expressing each gene
+  if (min_pct_expression > 0) {
+    pct_expressed <- rowSums(expr_data > 0) / ncol(expr_data) * 100
+    expressed_genes <- names(pct_expressed[pct_expressed >= min_pct_expression])
+    message(paste("Filtering: Using", length(expressed_genes), 
+                  "genes expressed in >=", min_pct_expression, "% of cells"))
+  } else {
+    expressed_genes <- rownames(expr_data)
+  }
+  
+  # Get combined UP+DOWN genes for each signature
+  signature_genes <- list()
+  
+  for (sig_base in signature_bases) {
+    # Get UP and DN gene lists
+    up_genes <- gene_sets_list[[paste0(sig_base, "_UP")]]
+    dn_genes <- gene_sets_list[[paste0(sig_base, "_DN")]]
+    
+    # Combine UP and DOWN
+    all_genes <- unique(c(up_genes, dn_genes))
+    
+    # Filter by expression
+    expressed_sig_genes <- intersect(all_genes, expressed_genes)
+    
+    signature_genes[[sig_base]] <- expressed_sig_genes
+    
+    message(paste(sig_base, ":", length(expressed_sig_genes), 
+                  "expressed genes out of", length(all_genes), "total"))
+  }
+  
+  # Calculate overlap matrix
+  n_sigs <- length(signature_bases)
+  overlap_matrix <- matrix(0, nrow = n_sigs, ncol = n_sigs,
+                           dimnames = list(signature_bases, signature_bases))
+  
+  for (i in 1:n_sigs) {
+    for (j in 1:n_sigs) {
+      sig1 <- signature_bases[i]
+      sig2 <- signature_bases[j]
+      
+      overlap_genes <- intersect(signature_genes[[sig1]], signature_genes[[sig2]])
+      overlap_matrix[i, j] <- length(overlap_genes)
+    }
+  }
+  
+  return(list(
+    overlap_matrix = overlap_matrix,
+    signature_genes = signature_genes
+  ))
+}
+
+# Function to create overlap heatmap
+plot_signature_overlap <- function(overlap_matrix, title_suffix = "") {
+  
+  # Simplify signature names for plotting
+  rownames(overlap_matrix) <- gsub("GSE[0-9]+_", "", rownames(overlap_matrix))
+  rownames(overlap_matrix) <- gsub("_VS.*", "", rownames(overlap_matrix))
+  colnames(overlap_matrix) <- rownames(overlap_matrix)
+  
+  # Create heatmap
+  pheatmap(overlap_matrix,
+           cluster_rows = FALSE,
+           cluster_cols = FALSE,
+           display_numbers = TRUE,
+           number_format = "%.0f",
+           color = colorRampPalette(c("white", "lightblue"))(100),
+           main = paste("Gene Overlap Between Signatures", title_suffix),
+           fontsize = 10,
+           fontsize_number = 10,
+           angle_col = 45)
+}
+
+# Filter: genes expressed in >=10% of cells
+result_10pct <- calculate_signature_overlap(subset_hcv.flashseq, 
+                                            gene_sets_list, 
+                                            signature_bases, 
+                                            min_pct_expression = 10)
+plot_signature_overlap(result_10pct$overlap_matrix, "(≥10% cells)")
+
+
+# Supplementary Figure 7C - shared clones between individuals
+meta_data <- subset_hcv.flashseq@meta.data
+
+patient_clones_distinct <- meta_data %>%
+  filter(!is.na(TCRnt) & !is.na(Patient)) %>%
+  select(TCRnt, Patient) %>%
+  distinct()
+
+clone_sharing_summary <- patient_clones_distinct %>%
+  group_by(TCRnt) %>%
+  summarise(n_patients = n_distinct(Patient), .groups = 'drop') %>%
+  mutate(CloneType = ifelse(n_patients > 1, "Shared", "Private"))
+
+total_shared_clones <- clone_sharing_summary %>%
+  filter(CloneType == "Shared") %>%
+  nrow()
+
+total_private_clones <- clone_sharing_summary %>%
+  filter(CloneType == "Private") %>%
+  nrow()
+
+cat("Total unique clones (across all patients):", nrow(clone_sharing_summary), "\n")
+cat("Total shared/public clones (found in >1 patient):", total_shared_clones, "\n")
+cat("Total private clones (found in only 1 patient):", total_private_clones, "\n")
+
+plot_data <- patient_clones_distinct %>%
+  left_join(clone_sharing_summary, by = "TCRnt") %>%
+  group_by(Patient, CloneType) %>%
+  summarise(Count = n(), .groups = 'drop')
+
+plot_data$CloneType <- factor(plot_data$CloneType, levels = c("Private", "Shared"))
+
+ggplot(plot_data, aes(x = Patient, y = Count, fill = CloneType)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = c("Private" = "gray70", "Shared" = "darkblue")) +  # darkgreen darkblue
+  labs(
+    title = "Private vs. Shared Clones by Patient",
+    x = "Patient",
+    y = "Number of Unique Clones",
+    fill = "Clone Type"
+  ) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
