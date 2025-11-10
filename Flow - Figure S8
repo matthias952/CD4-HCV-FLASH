@@ -1,0 +1,400 @@
+### Figure S8 - acute and chronic tSNE clustering
+
+library(Matrix) 
+library(flowCore) 
+library(CATALYST)
+library(ggplot2) 
+library(SingleCellExperiment) 
+library(stringr)
+library(dplyr)
+library(ggrepel)
+library(scales)
+
+# Function to extract metadata from filename
+extract_file_metadata <- function(filename) {
+  base <- sub("\\.fcs$", "", filename)
+  parts <- strsplit(base, "_")[[1]]
+  date <- parts[1]
+  patient <- parts[2]
+  condition <- parts[3]
+  
+  # Create matching key
+  match_key <- paste(date, patient, condition, sep = "_")
+  
+  return(list(
+    date = date,
+    patient = patient,
+    condition = condition,
+    match_key = match_key,
+    is_gated = grepl("_EFF", base)
+  ))
+}
+
+# Function to read and process FCS files from a directory
+read_fcs_directory <- function(dir_path, marker_indices = 7:22) {
+    
+  # Get all FCS files
+  fcs_files <- list.files(dir_path, pattern = "\\.fcs$", full.names = TRUE, recursive = TRUE)
+    
+  # Read all files and extract parameters
+  data_list <- list()
+  fcs_params <- list()
+  file_metadata <- list()
+  
+  for (i in seq_along(fcs_files)) {
+    data_list[[i]] <- read.FCS(fcs_files[i], alter.names = TRUE)
+    fcs_params[[i]] <- as.character(data_list[[i]]@parameters@data$name)
+    file_metadata[[i]] <- extract_file_metadata(basename(fcs_files[i]))
+  }
+  
+  # Find common parameters
+  common_params <- Reduce(intersect, fcs_params)
+  
+  # Subset to marker parameters
+  marker_params <- common_params[marker_indices]
+    
+  # Subset flowFrames to marker parameters only
+  for (i in seq_along(data_list)) {
+    data_list[[i]] <- data_list[[i]][, marker_params]
+  }
+  
+  # Create flowSet
+  fs <- as(data_list, "flowSet")
+  sampleNames(fs) <- basename(fcs_files)
+  
+  return(list(
+    flowset = fs,
+    metadata = file_metadata,
+    filenames = basename(fcs_files),
+    marker_params = marker_params
+  ))
+}
+
+# Function to create metadata dataframe
+create_metadata <- function(filenames, file_metadata) {
+  
+  md <- data.frame(
+    file_name = filenames,
+    date = sapply(file_metadata, function(x) x$date),
+    patient = sapply(file_metadata, function(x) x$patient),
+    condition = sapply(file_metadata, function(x) x$condition),
+    match_key = sapply(file_metadata, function(x) x$match_key),
+    is_gated = sapply(file_metadata, function(x) x$is_gated),
+    stringsAsFactors = FALSE
+  )
+  
+  md$sample_id <- md$file_name
+  md$patientcondition <- paste0(md$patient, "_", md$condition)
+  
+  # Convert to factors
+  md$patient <- factor(md$patient, levels = unique(md$patient))
+  md$patientcondition <- factor(md$patientcondition, levels = unique(md$patientcondition))
+  md$condition <- factor(md$condition, levels = unique(md$condition))
+  md$date <- factor(md$date, levels = unique(md$date))
+  
+  return(md)
+}
+
+# Function to create panel annotations
+create_panel <- function(flowframe) {
+  
+  panel <- data.frame(
+    fcs_colname = as.character(flowframe@parameters@data$name),
+    antigen = as.character(flowframe@parameters@data$desc),
+    stringsAsFactors = FALSE
+  )
+  
+  # Default all to type
+  panel$marker_class <- "type"
+  
+  # Mark state markers
+  panel$marker_class[grep("TET|CD4", panel$antigen)] <- "state"
+  panel$marker_class[grep("CD45RA", panel$antigen)] <- "type"
+  
+  return(panel)
+}
+
+# Function to create unique cell IDs using all marker parameters
+create_cell_fingerprint <- function(expr_matrix, n_decimals = 3) {
+  # Round to avoid floating point precision issues
+  rounded <- round(expr_matrix, n_decimals)
+  
+  # Create fingerprint by pasting all marker values
+  fingerprints <- apply(rounded, 2, function(x) paste(x, collapse = "_"))
+  
+  return(fingerprints)
+}
+
+# Set working directories
+bulk_dir <- ".../FCS_files/Figure S8/Bulk"
+gated_dir <- ".../FCS_files/Figure S8/Gated"
+
+# Read bulk files (ungated)
+bulk_data <- read_fcs_directory(bulk_dir, marker_indices = 7:22)
+
+# Create metadata and panel
+md_bulk <- create_metadata(bulk_data$filenames, bulk_data$metadata)
+panel <- create_panel(bulk_data$flowset[[1]])
+
+# Create SCE
+sce_bulk <- prepData(
+  bulk_data$flowset,
+  panel = panel,
+  md = md_bulk,
+  md_cols = list(
+    file = "file_name", 
+    id = "sample_id", 
+    factors = c("date", "patient", "condition", "patientcondition")
+  ),
+  features = panel$fcs_colname,
+  transform = TRUE,
+  cofactor = 150,
+  by_time = FALSE,
+  FACS = TRUE
+)
+
+# Read gated files
+gated_data <- read_fcs_directory(gated_dir, marker_indices = 7:22)
+
+# Create metadata
+md_gated <- create_metadata(gated_data$filenames, gated_data$metadata)
+
+# Verify same panel structure
+panel_gated <- create_panel(gated_data$flowset[[1]])
+if (!identical(panel$fcs_colname, panel_gated$fcs_colname)) {
+  warning("Panel parameters differ between bulk and gated files!")
+}
+
+# Create SCE for gated
+sce_gated <- prepData(
+  gated_data$flowset,
+  panel = panel_gated,
+  md = md_gated,
+  md_cols = list(
+    file = "file_name", 
+    id = "sample_id", 
+    factors = c("date", "patient", "condition", "patientcondition")
+  ),
+  features = panel_gated$fcs_colname,
+  transform = TRUE,
+  cofactor = 150,
+  by_time = FALSE,
+  FACS = TRUE
+)
+
+# Match files and cells
+# Match files by match_key
+bulk_keys <- unique(md_bulk$match_key)
+gated_keys <- unique(md_gated$match_key)
+
+matched_keys <- intersect(bulk_keys, gated_keys)
+unmatched_bulk <- setdiff(bulk_keys, gated_keys)
+unmatched_gated <- setdiff(gated_keys, bulk_keys)
+
+message(sprintf("Matched samples: %d", length(matched_keys)))
+
+if (length(unmatched_bulk) > 0) {
+  warning(sprintf("Unmatched BULK samples (%d): %s", 
+                  length(unmatched_bulk), 
+                  paste(unmatched_bulk, collapse = ", ")))
+}
+
+if (length(unmatched_gated) > 0) {
+  warning(sprintf("Unmatched GATED samples (%d): %s", 
+                  length(unmatched_gated), 
+                  paste(unmatched_gated, collapse = ", ")))
+}
+
+# Create cell fingerprints for matching
+expr_bulk <- assay(sce_bulk, "exprs")
+expr_gated <- assay(sce_gated, "exprs")
+
+# Create fingerprints using all marker parameters
+colData(sce_bulk)$cell_fingerprint <- create_cell_fingerprint(expr_bulk)
+colData(sce_gated)$cell_fingerprint <- create_cell_fingerprint(expr_gated)
+
+# Also store sample match key for proper matching
+colData(sce_bulk)$match_key <- md_bulk$match_key[match(colData(sce_bulk)$sample_id, md_bulk$sample_id)]
+colData(sce_gated)$match_key <- md_gated$match_key[match(colData(sce_gated)$sample_id, md_gated$sample_id)]
+
+# Check for duplicates within each dataset
+dup_bulk <- sum(duplicated(colData(sce_bulk)$cell_fingerprint))
+dup_gated <- sum(duplicated(colData(sce_gated)$cell_fingerprint))
+
+if (dup_bulk > 0) {
+  warning(sprintf("Found %d duplicate cell fingerprints in bulk data", dup_bulk))
+}
+if (dup_gated > 0) {
+  warning(sprintf("Found %d duplicate cell fingerprints in gated data", dup_gated))
+}
+
+# Create composite key: match_key + cell_fingerprint for accurate matching
+colData(sce_bulk)$composite_id <- paste(
+  colData(sce_bulk)$match_key, 
+  colData(sce_bulk)$cell_fingerprint, 
+  sep = "||"
+)
+
+colData(sce_gated)$composite_id <- paste(
+  colData(sce_gated)$match_key, 
+  colData(sce_gated)$cell_fingerprint, 
+  sep = "||"
+)
+
+# Match cells from gated to bulk
+# Cells in gated are "EFF", cells not in gated are "non-EFF"
+bulk_composite_ids <- colData(sce_bulk)$composite_id
+gated_composite_ids <- colData(sce_gated)$composite_id
+
+# Mark cells as EFF if they exist in gated data
+colData(sce_bulk)$gate_status <- ifelse(
+  bulk_composite_ids %in% gated_composite_ids,
+  "EFF",
+  "non-EFF"
+)
+
+colData(sce_bulk)$gate_status <- factor(
+  colData(sce_bulk)$gate_status, 
+  levels = c("non-EFF", "EFF")
+)
+
+n_eff <- sum(colData(sce_bulk)$gate_status == "EFF")
+n_total <- ncol(sce_bulk)
+
+message(sprintf("Matched cells: %d EFF out of %d total (%.1f%%)", 
+                n_eff, n_total, 100 * n_eff / n_total))
+
+# Downsampling and run dimensionality reduction
+# Set downsampling parameters
+set.seed(1234)
+n_cells_per_sample <- 200 
+
+# Get unique sample IDs
+unique_samples <- unique(sce_bulk$sample_id)
+message(sprintf("Found %d unique samples to downsample", length(unique_samples)))
+
+# Downsample each sample separately
+subset_indices <- c()
+
+for (sample in unique_samples) {
+  # Get indices for this sample
+  sample_indices <- which(sce_bulk$sample_id == sample)
+  n_available <- length(sample_indices)
+  
+  # Sample up to n_cells_per_sample (or all if fewer available)
+  n_to_sample <- min(n_cells_per_sample, n_available)
+  sampled_indices <- sample(sample_indices, n_to_sample)
+  
+  # Add to overall subset
+  subset_indices <- c(subset_indices, sampled_indices)
+  
+  message(sprintf("  Sample %s: sampled %d/%d cells", 
+                  sample, n_to_sample, n_available))
+}
+
+# Create downsampled SCE
+sce <- sce_bulk[, subset_indices]
+
+# Run tSNE
+sce <- runDR(sce, "TSNE", features = "type", cells = ncol(sce))
+
+# Run clustering
+sce <- CATALYST::cluster(sce, features = "type", xdim = 2, ydim = 2, maxK = 3, seed = 1234)
+
+# Extract cluster assignments
+sce$cluster_id <- cluster_ids(sce, k = "meta4")
+
+# Plotting
+# Define color schemes
+clust_colors <- c(
+  "1" = "#359335",
+  "2" = "grey50",
+  "3" = "grey20",
+  "4" = "grey80"
+)
+
+cond_colors <- c(
+  "BL" = "#B40000",
+  "acute" = "#0000E2"
+)
+
+gate_colors <- c(
+  "non-EFF" = "#00BFC4",
+  "EFF" = "#F8766D"
+)
+
+# Common theme
+theme_clean <- theme(
+  panel.background = element_rect(fill = "white", color = NA),
+  plot.background = element_rect(fill = "white", color = NA),
+  legend.position = "none",
+  axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank()
+)
+
+# Plot vlusters
+plotDR(sce, dr = "TSNE", color_by = "cluster_id") + 
+  geom_point(size = 2) + 
+  scale_color_manual(values = clust_colors)
+
+# Plot condition
+plotDR(sce, "TSNE", color_by = "condition", ncol = 4) + 
+  geom_point(size = 2) +
+  scale_color_manual(values = cond_colors)
+
+# Plot by gate status
+plotDR(sce, "TSNE", color_by = "gate_status", ncol = 4) + 
+  geom_point(size = 2) +
+  scale_color_manual(values = gate_colors) +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+# Plot cluster composition by condition
+df <- as.data.frame(colData(sce))
+
+comp <- df %>%
+  count(condition, cluster_id, name = "n") %>%
+  group_by(condition) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup()
+
+comp$condition <- factor(comp$condition, levels = c("acute", "BL"))
+
+ggplot(comp, aes(x = condition, y = pct, fill = cluster_id)) +
+  geom_col() +
+  scale_fill_manual(values = clust_colors) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(x = "Condition", y = "Cluster composition (%)", fill = "Cluster") +
+  theme_minimal()
+  #theme_clean
+
+# Plot condition composition within clusters
+comp_by_cluster <- df %>%
+  count(cluster_id, condition, name = "n") %>%
+  group_by(cluster_id) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup()
+
+comp_by_cluster$condition <- factor(comp_by_cluster$condition, levels = c("acute", "BL"))
+comp_by_cluster$cluster_id <- factor(comp_by_cluster$cluster_id, levels = c("1", "2", "3", "4"))
+
+ggplot(comp_by_cluster, aes(x = cluster_id, y = pct, fill = condition)) +
+  geom_col() +
+  scale_fill_manual(values = cond_colors) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(x = "Cluster", y = "Condition composition (%)", fill = "Condition") +
+  theme_minimal()
+  #theme_clean
+
+
+# Plot marker expression
+marker_indices <- c(1:16)
+markers_to_plot <- rownames(sce)[marker_indices]
+
+plotDR(sce, "TSNE", scale = TRUE, color_by = markers_to_plot, 
+             ncol = 4, a_pal = rev(hcl.colors(10, "Spectral"))) + 
+  geom_point(size = 1)
