@@ -1,13 +1,15 @@
-### Figure 1
+### Figure 1 and S3
 
+# Libraries
 library(ggplot2)
 library(Seurat)
 library(dplyr)
 library(AUCell)
-library(clusterProfiler) 
+library(clusterProfiler)
 library(tibble)
 library(ggpubr)
 library(patchwork)
+library(tidyr)
 
 # Set seed
 set.seed(123)
@@ -24,7 +26,8 @@ prepare_noQC_object <- function(path) {
   obj <- obj[!rownames(obj) %in% genes_to_remove, ]
   
   obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
-
+  obj <- subset(obj, subset = CD14 < 0.001 & CD19 < 0.001 & MS4A7 < 0.001 & PPBP < 0.001)
+  
   obj$cells <- paste0(obj$Plate, obj$Well)
   obj$Timepoint <- factor(obj$Timepoint, levels = c("BL", "FU", "SPR", "acute"))
   obj@meta.data[["Timepoint"]] <- droplevels(obj@meta.data[["Timepoint"]])
@@ -48,7 +51,8 @@ expr_all <- GetAssayData(hcv_all, assay = "RNA", slot = "data")
 expr_noQC <- GetAssayData(hcv_noQC, assay = "RNA", slot = "data")
 
 # Get GMT files
-gmt_files <- list.files("gmt_files/Fig1/", # path to gmt files
+gmt_files <- list.files(
+  ".../Figure 1E",
   pattern = "\\.gmt$",
   full.names = TRUE
 )
@@ -104,7 +108,7 @@ for (gmt_file in gmt_files) {
   hcv_all[[paste0("AUCell_adjusted_", set_name)]] <- adjusted_scores
 }
 
-# Identify all UP/DN gene sets
+# Create composite scores from UP/DN pairs
 adjusted_cols <- grep("^AUCell_adjusted_", colnames(hcv_all@meta.data), value = TRUE)
 base_names <- unique(gsub("_(UP|DN)$", "", gsub("^AUCell_adjusted_", "", adjusted_cols)))
 
@@ -121,6 +125,7 @@ for (base in base_names) {
   }
 }
 
+# Define final features
 final_features <- character()
 for (base in base_names) {
   composite_col <- paste0("AUCell_composite_", base)
@@ -133,27 +138,27 @@ for (base in base_names) {
 }
 final_features <- unique(final_features) # Ensure no duplicates
 
-# Figure S2C
+# Create the subset object for all downstream plotting
 plot_object <- subset(hcv_all, subset = Naive != "Naive")
 
+# Supplementary Figure S3A - compare scores between time points
 VlnPlot(plot_object,
         features = final_features,
         group.by = "Timepoint",
         pt.size = 0,
-        cols = c("#0000E2", "#B40000", "#FFC2C2", "#B2DFEE"),
+        cols = c("#4141FF", "#D50000", "#FFC2C2", "#B2DFEE"),
         ncol = 5
-) & NoLegend() & theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+) 
 
-# Figure 1 E
-# Perform Statistical Analysis
-stats_results_list <- list()
-metadata_subset <- plot_object@meta.data
+# Perform statistical analysis
+stats_results_list_S3A <- list()
+metadata_subset_S3A <- plot_object@meta.data
 
 for (feature_name in final_features) {
   # Perform pairwise Wilcoxon tests for post-hoc analysis
   pairwise_result <- pairwise.wilcox.test(
-    metadata_subset[[feature_name]],
-    metadata_subset$Timepoint,
+    metadata_subset_S3A[[feature_name]],
+    metadata_subset_S3A$Timepoint,
     p.adjust.method = "BH"
   )
   
@@ -166,7 +171,7 @@ for (feature_name in final_features) {
   # Calculate median scores for each cluster
   medians <- aggregate(
     get(feature_name) ~ Timepoint,
-    data = metadata_subset,
+    data = metadata_subset_S3A,
     FUN = median
   )
   colnames(medians) <- c("Cluster", "Median_Score")
@@ -176,11 +181,11 @@ for (feature_name in final_features) {
   p_values_df$Median_Cluster2 <- medians$Median_Score[match(p_values_df$Cluster2, medians$Cluster)]
   
   # Store the tidy data frame in the list
-  stats_results_list[[feature_name]] <- p_values_df
+  stats_results_list_S3A[[feature_name]] <- p_values_df
 }
 
 # Combine the list of data frames
-final_stats_df <- do.call(rbind, stats_results_list)
+final_stats_df <- do.call(rbind, stats_results_list_S3A)
 rownames(final_stats_df) <- NULL
 
 # Reorder columns
@@ -190,20 +195,76 @@ final_stats_df <- final_stats_df[, c("Feature", "Cluster1", "Cluster2", "Median_
 print(final_stats_df)
 
 
-## Figure 1E
-# Scale scores for inter gene set comparability
-for (col in final_features) {
-  scaled_col_name <- gsub("AUCell_composite_", "AUCell_scaledcompo_", col)
-  plot_object@meta.data[[scaled_col_name]] <- scale(plot_object@meta.data[[col]])[,1]
-}
-# Update composite_columns to use scaled scores
+# Supplementary Figure S3B - compare gene sets within time points
 scaled_composite_columns <- gsub("AUCell_composite_", "AUCell_scaledcompo_", final_features)
+for (i in seq_along(final_features)) {
+  plot_object@meta.data[[scaled_composite_columns[i]]] <- scale(plot_object@meta.data[[final_features[i]]])[,1]
+}
 
-df <- plot_object@meta.data[, c(scaled_composite_columns, "Timepoint"), drop = FALSE]
+# Extract and reshape data for S3B
+df_S3B <- plot_object@meta.data[, c(scaled_composite_columns, "Timepoint"), drop = FALSE]
 
-median_data <- df %>%
-  group_by(.data[["Timepoint"]]) %>%
+long_df_S3B <- df_S3B %>%
+  pivot_longer(cols = -Timepoint, names_to = "GeneSet", values_to = "Score")
+
+timepoint_order <- c("acute", "BL", "FU", "SPR")
+long_plot_df_S3B <- long_df_S3B %>%
+  mutate(Timepoint = factor(Timepoint, levels = timepoint_order)) %>%
+  filter(!is.na(Timepoint))
+
+# Plot for S3B
+ggplot(long_plot_df_S3B, aes(x = GeneSet, y = Score, fill = GeneSet)) +
+  geom_violin(trim = T) +
+  facet_wrap(~ Timepoint, ncol = 4) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        legend.position = "none",
+        panel.grid = element_blank(),
+        strip.background = element_rect(fill="grey90", color=NA),
+        strip.text = element_text(face="bold")) +
+  labs(x = "Gene Set", y = "Scaled AUCell Score") +
+  scale_fill_viridis_d()
+
+# Statistical Analysis for S3B
+stats_results_list_S3B <- list()
+
+for (tp in unique(long_df_S3B$Timepoint)) {
+  subset_long <- long_df_S3B %>% filter(Timepoint == tp)
+  
+  pairwise_result <- pairwise.wilcox.test(
+    subset_long$Score,
+    subset_long$GeneSet,
+    p.adjust.method = "BH"
+  )
+  
+  p_values_df <- as.data.frame(as.table(pairwise_result$p.value))
+  colnames(p_values_df) <- c("GeneSet1", "GeneSet2", "P_adj_BH")
+  p_values_df$Timepoint <- tp
+  p_values_df <- na.omit(p_values_df)
+  
+  medians <- aggregate(
+    Score ~ GeneSet,
+    data = subset_long,
+    FUN = median
+  )
+  colnames(medians) <- c("GeneSet", "Median_Score")
+  
+  p_values_df$Median_GeneSet1 <- medians$Median_Score[match(p_values_df$GeneSet1, medians$GeneSet)]
+  p_values_df$Median_GeneSet2 <- medians$Median_Score[match(p_values_df$GeneSet2, medians$GeneSet)]
+  
+  stats_results_list_S3B[[tp]] <- p_values_df
+}
+
+final_stats_S3B_df <- do.call(rbind, stats_results_list_S3B)
+rownames(final_stats_S3B_df) <- NULL
+final_stats_S3B_df <- final_stats_S3B_df[, c("Timepoint", "GeneSet1", "GeneSet2", "Median_GeneSet1", "Median_GeneSet2", "P_adj_BH")]
+print(final_stats_S3B_df)
+
+
+# Figure 1E - radar plots created in excel
+# Median summary data for 
+median_summary_S3B <- df_S3B %>%
+  group_by(Timepoint) %>%
   summarise(across(all_of(scaled_composite_columns), median, na.rm = TRUE))
 
-# View the summarized data
-print(median_data)
+print(median_summary_S3B)
